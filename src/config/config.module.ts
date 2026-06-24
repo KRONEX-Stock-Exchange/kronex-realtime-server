@@ -1,16 +1,15 @@
-import { Module } from "@nestjs/common";
-import { ConfigModule } from "@nestjs/config";
-import config from "./config";
+import { Module } from '@nestjs/common';
+import { ConfigModule } from '@nestjs/config';
+import config from './config';
 
 @Module({
     imports: [
         ConfigModule.forRoot({
-            envFilePath: ".env",
+            envFilePath: '.env',
             isGlobal: true,
-            load: [config]
-        })
-    ]
+            load: [config],
+        }),
+    ],
 })
-
 export class configurationModule {}
-export { ConfigModule }
+export { ConfigModule };

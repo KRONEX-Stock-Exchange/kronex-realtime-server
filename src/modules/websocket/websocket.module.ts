@@ -11,7 +11,14 @@ import { StockLimitService } from './service/stock-limit.service';
 @Module({
     imports: [],
     controllers: [EventConsumer],
-    providers: [WebsocketGateway, StockWsService, AccountWsService, OrderWsService, ChartWsService, StockLimitService],
+    providers: [
+        WebsocketGateway,
+        StockWsService,
+        AccountWsService,
+        OrderWsService,
+        ChartWsService,
+        StockLimitService,
+    ],
     exports: [WebsocketGateway, ChartWsService],
 })
 export class WebsocketModule {}

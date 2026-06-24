@@ -117,7 +117,8 @@ export class WebsocketGateway
         @MessageBody('type') type: ChartType,
         @MessageBody('from') from?: string,
     ) {
-        if (stockId == null || type == null) throw new WebsocketException('INVALID_PAYLOAD');
+        if (stockId == null || type == null)
+            throw new WebsocketException('INVALID_PAYLOAD');
         const fromDate = from ? new Date(from) : undefined;
         await this.chartWsService.onJoinChartRoom(stockId, type, client, fromDate);
     }
@@ -128,7 +129,8 @@ export class WebsocketGateway
         @MessageBody('stockId') stockId: number,
         @MessageBody('type') type: ChartType,
     ) {
-        if (stockId == null || type == null) throw new WebsocketException('INVALID_PAYLOAD');
+        if (stockId == null || type == null)
+            throw new WebsocketException('INVALID_PAYLOAD');
         this.chartWsService.onLeaveChartRoom(stockId, type, client);
     }
 }
