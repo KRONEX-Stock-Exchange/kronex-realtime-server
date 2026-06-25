@@ -23,6 +23,6 @@ RUN npm ci
 
 COPY --from=builder /app/dist ./dist
 
-EXPOSE 3000
+EXPOSE 3001
 
-CMD ["sh", "-c", "npx prisma migrate deploy && npx prisma db seed && node dist/main"]
+CMD ["sh", "-c", "node dist/main"]
