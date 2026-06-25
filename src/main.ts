@@ -41,7 +41,7 @@ async function bootstrap() {
             queueOptions: {
                 durable: true,
             },
-            prefetchCount: numberConfig(configService, 'EVENT_QUEUE_PREFETCH', 1),
+            prefetchCount: 1,
             noAck: false,
             deserializer: new EventBatchDeserializer(),
         },
