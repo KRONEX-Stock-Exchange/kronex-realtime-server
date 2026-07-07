@@ -1,7 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { PrismaService } from 'src/common/prisma/prisma.service';
-import { ChartWsService, PendingCandle } from '../websocket/service/chart-ws.service';
+import { ChartWsService } from '../websocket/service/chart-ws.service';
+import { PendingCandle } from '../websocket/type/realtime-state.type';
 import { CANDLE_TYPE } from './type/chart-type';
 
 @Injectable()

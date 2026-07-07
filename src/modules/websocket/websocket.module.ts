@@ -6,6 +6,7 @@ import { AccountWsService } from './service/account-ws.service';
 import { OrderWsService } from './service/order-ws.service';
 import { ChartWsService } from './service/chart-ws.service';
 import { StockLimitService } from './service/stock-limit.service';
+import { RealtimeStateService } from './service/realtime-state.service';
 
 @Global()
 @Module({
@@ -18,6 +19,7 @@ import { StockLimitService } from './service/stock-limit.service';
         OrderWsService,
         ChartWsService,
         StockLimitService,
+        RealtimeStateService,
     ],
     exports: [WebsocketGateway, ChartWsService],
 })

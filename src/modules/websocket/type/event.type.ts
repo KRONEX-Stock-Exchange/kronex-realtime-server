@@ -1,23 +1,27 @@
 export interface EventBatch {
     inputSeq: number;
+    outputSeq: number;
     events: DomainEvent[];
 }
 
 // pattern으로 판별하는 discriminated union (consumer switch에서 자동 타입 좁힘)
 export type DomainEvent =
-    | { pattern: 'trade.executed'; data: TradeExecutedData }
-    | { pattern: 'order.open'; data: OrderLifecycleData }
-    | { pattern: 'order.filled'; data: OrderLifecycleData }
-    | { pattern: 'order.canceled'; data: OrderLifecycleData }
-    | { pattern: 'order.rejected'; data: OrderRejectedData }
-    | { pattern: 'account.updated'; data: AccountBalanceData }
-    | { pattern: 'account.activated'; data: AccountBalanceData }
-    | { pattern: 'holding.updated'; data: HoldingUpdatedData };
+    | { pattern: 'trade.executed'; data: TradeExecutedEventData }
+    | { pattern: 'order.open'; data: OrderLifecycleEventData }
+    | { pattern: 'order.filled'; data: OrderLifecycleEventData }
+    | { pattern: 'order.canceled'; data: OrderLifecycleEventData }
+    | { pattern: 'order.rejected'; data: OrderRejectedEventData }
+    | { pattern: 'account.updated'; data: AccountBalanceEventData }
+    | { pattern: 'account.activated'; data: AccountBalanceEventData }
+    | { pattern: 'holding.updated'; data: HoldingUpdatedEventData }
+    | { pattern: 'orderbook.updated'; data: OrderBookUpdatedEventData }
+    | { pattern: 'stock.listed'; data: StockStateEventData }
+    | { pattern: 'stock.updated'; data: StockStateEventData };
 
 export type EventName = DomainEvent['pattern'];
 
 // trade.executed — 체결 내역
-export interface TradeExecutedData {
+export interface TradeExecutedEventData {
     id: string;
     stockId: string;
     price: string;
@@ -28,7 +32,7 @@ export interface TradeExecutedData {
 }
 
 // order.open / order.filled / order.canceled — 주문 상태 전이
-export interface OrderLifecycleData {
+export interface OrderLifecycleEventData {
     orderId: string;
     accountId: string;
     stockId: string;
@@ -38,20 +42,20 @@ export interface OrderLifecycleData {
 }
 
 // order.rejected — 유효성 검사 실패로 거부
-export interface OrderRejectedData {
+export interface OrderRejectedEventData {
     orderId: string;
     reason: string;
 }
 
 // account.updated / account.activated — 계좌 잔고/활성화
-export interface AccountBalanceData {
+export interface AccountBalanceEventData {
     id: string;
     balance: string;
     availableBalance: string;
 }
 
 // holding.updated — 보유종목 변동
-export interface HoldingUpdatedData {
+export interface HoldingUpdatedEventData {
     accountId: string;
     stockId: string;
     quantity: string;
@@ -60,8 +64,18 @@ export interface HoldingUpdatedData {
     totalBuyAmount: string;
 }
 
-// stock.listed — 종목 상장/상태 변경
-export interface StockListedData {
+export interface OrderBookUpdatedEventData {
+    stockId: string;
+    levels: OrderBookUpdatedLevelEventData[];
+}
+
+export interface OrderBookUpdatedLevelEventData {
+    side: 'BUY' | 'SELL';
+    price: string;
+    quantity: string;
+}
+
+export interface StockStateEventData {
     id: string;
     price: string;
     status: 'LISTED' | 'SUSPENDED' | 'DELISTED' | 'PENDING';
