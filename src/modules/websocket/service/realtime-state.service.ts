@@ -20,7 +20,7 @@ export class RealtimeStateService {
     readonly trade = new TradeRealtimeState();
     readonly chart = new ChartRealtimeState();
 
-    applyEvent(event: DomainEvent): void {
+    applyEvent(event: DomainEvent, outputSeq?: bigint): void {
         switch (event.pattern) {
             case 'stock.listed':
             case 'stock.updated':
@@ -63,6 +63,21 @@ export class RealtimeStateService {
                 if (this.trade.add(trade)) {
                     this.chart.applyTrade(trade);
                 }
+                break;
+            }
+            case 'orderbook.updated': {
+                if (outputSeq == null) break;
+
+                const stockId = Number(event.data.stockId);
+                this.stock.applyOrderBookUpdate(
+                    stockId,
+                    outputSeq,
+                    event.data.levels.map((level) => ({
+                        side: level.side,
+                        price: BigInt(level.price),
+                        quantity: BigInt(level.quantity),
+                    })),
+                );
                 break;
             }
             case 'order.rejected':

@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { StockStatus } from '@prisma/client';
+import { CursorType, Prisma, StockStatus } from '@prisma/client';
 import { CustomSocket } from '../interface/custom-socket.interface';
 import { PrismaService } from 'src/common/prisma/prisma.service';
 import { Server } from 'socket.io';
@@ -10,12 +10,26 @@ import { hasRoomMembers } from './socket-room.util';
 import { RealtimeStateService } from './realtime-state.service';
 import {
     RealtimeMatchedTradeState,
+    RealtimeOrderBookLevelState,
+    RealtimeOrderBookState,
     RealtimeStockInfo,
 } from '../type/realtime-state.type';
+
+type BigIntInput = bigint | number | string | { toString(): string };
+
+type OrderBookRow = {
+    side: 'BUY' | 'SELL';
+    price: BigIntInput;
+    quantity: BigIntInput | null;
+};
 
 @Injectable()
 export class StockWsService {
     private server: Server;
+    private readonly orderBookLoadPromises = new Map<
+        number,
+        Promise<RealtimeOrderBookState>
+    >();
 
     constructor(
         private readonly prismaService: PrismaService,
@@ -67,7 +81,6 @@ export class StockWsService {
         this.server.to(this.stockRoom(stockId)).emit('stockInfoUpdated', data);
     }
 
-    // TODO
     // 호가창 데이터 전송
     async sendOrderBook(stockId: number) {
         if (!hasRoomMembers(this.server, this.stockRoom(stockId))) return;
@@ -137,34 +150,83 @@ export class StockWsService {
     }
 
     private async getOrderBook(stockId: number) {
-        const [buyRows, sellRows] = await Promise.all([
-            this.prismaService.$queryRaw<Array<{ price: bigint; quantity: bigint }>>`
-                SELECT price, SUM(quantity - filled_quantity) AS quantity
-                FROM orders
-                WHERE stock_id = ${stockId} AND trading_type = 'BUY' AND status = 'OPEN'
-                GROUP BY trading_type, price
-                ORDER BY price DESC
-                LIMIT 10
-            `,
-            this.prismaService.$queryRaw<Array<{ price: bigint; quantity: bigint }>>`
-                SELECT price, SUM(quantity - filled_quantity) AS quantity
-                FROM orders
-                WHERE stock_id = ${stockId} AND trading_type = 'SELL' AND status = 'OPEN'
-                GROUP BY trading_type, price
-                ORDER BY price ASC
-                LIMIT 10
-            `,
-        ]);
-        return {
-            buyOrderbook: buyRows.map((row) => ({
-                price: row.price.toString(),
-                quantity: row.quantity.toString(),
-            })),
-            sellOrderbook: sellRows.map((row) => ({
-                price: row.price.toString(),
-                quantity: row.quantity.toString(),
-            })),
-        };
+        const orderBook = await this.getOrLoadOrderBook(stockId);
+        return this.serializeOrderBook(orderBook);
+    }
+
+    private async getOrLoadOrderBook(stockId: number): Promise<RealtimeOrderBookState> {
+        const cached = this.state.stock.getOrderBook(stockId);
+        if (cached) return cached;
+
+        const loading = this.orderBookLoadPromises.get(stockId);
+        if (loading) return loading;
+
+        const loadPromise = this.loadOrderBook(stockId)
+            .then((loaded) => {
+                const current = this.state.stock.getOrderBook(stockId);
+                if (current && current.outputSeq > loaded.outputSeq) return current;
+
+                this.state.stock.setOrderBook(loaded);
+                return this.state.stock.getOrderBook(stockId) ?? loaded;
+            })
+            .finally(() => {
+                this.orderBookLoadPromises.delete(stockId);
+            });
+
+        this.orderBookLoadPromises.set(stockId, loadPromise);
+        return loadPromise;
+    }
+
+    private async loadOrderBook(stockId: number): Promise<RealtimeOrderBookState> {
+        return this.prismaService.$transaction(
+            async (tx) => {
+                const rows = await tx.$queryRaw<OrderBookRow[]>`
+                    SELECT
+                        trading_type AS side,
+                        price,
+                        SUM(quantity - filled_quantity) AS quantity
+                    FROM orders
+                    WHERE
+                        stock_id = ${stockId}
+                        AND trading_type IN ('BUY', 'SELL')
+                        AND status = 'OPEN'
+                    GROUP BY trading_type, price
+                    HAVING quantity > 0
+                `;
+
+                const cursor = await tx.cursor.findUnique({
+                    where: { type: CursorType.DB_APPLIED_OUTPUT_SEQ },
+                    select: { index: true },
+                });
+
+                return this.toOrderBookState(
+                    stockId,
+                    cursor?.index ?? 0n,
+                    rows.map((row) => ({
+                        side: row.side,
+                        price: this.toBigInt(row.price),
+                        quantity: row.quantity == null ? 0n : this.toBigInt(row.quantity),
+                    })),
+                );
+            },
+            { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead },
+        );
+    }
+
+    private toOrderBookState(
+        stockId: number,
+        outputSeq: bigint,
+        levels: RealtimeOrderBookLevelState[],
+    ): RealtimeOrderBookState {
+        const buyLevels = new Map<bigint, bigint>();
+        const sellLevels = new Map<bigint, bigint>();
+
+        for (const level of levels) {
+            const sideLevels = level.side === 'BUY' ? buyLevels : sellLevels;
+            sideLevels.set(level.price, level.quantity);
+        }
+
+        return { stockId, outputSeq, buyLevels, sellLevels };
     }
 
     private async getMatchedList(stockId: number) {
@@ -207,5 +269,35 @@ export class StockWsService {
             quantity: trade.quantity.toString(),
             type: trade.tradingType,
         };
+    }
+
+    private serializeOrderBook(orderBook: RealtimeOrderBookState) {
+        return {
+            buyOrderbook: this.serializeOrderBookLevels(orderBook.buyLevels, 'desc'),
+            sellOrderbook: this.serializeOrderBookLevels(orderBook.sellLevels, 'asc'),
+        };
+    }
+
+    private serializeOrderBookLevels(
+        levels: Map<bigint, bigint>,
+        direction: 'asc' | 'desc',
+    ) {
+        // WHAT THE
+        return [...levels.entries()]
+            .filter(([, quantity]) => quantity > 0n)
+            .sort(([a], [b]) => {
+                if (a === b) return 0;
+                if (direction === 'asc') return a < b ? -1 : 1;
+                return a > b ? -1 : 1;
+            })
+            .slice(0, 10)
+            .map(([price, quantity]) => ({
+                price: price.toString(),
+                quantity: quantity.toString(),
+            }));
+    }
+
+    private toBigInt(value: BigIntInput): bigint {
+        return BigInt(value.toString());
     }
 }

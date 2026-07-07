@@ -1,5 +1,6 @@
 export interface EventBatch {
     inputSeq: number;
+    outputSeq: number;
     events: DomainEvent[];
 }
 
@@ -13,6 +14,7 @@ export type DomainEvent =
     | { pattern: 'account.updated'; data: AccountBalanceEventData }
     | { pattern: 'account.activated'; data: AccountBalanceEventData }
     | { pattern: 'holding.updated'; data: HoldingUpdatedEventData }
+    | { pattern: 'orderbook.updated'; data: OrderBookUpdatedEventData }
     | { pattern: 'stock.listed'; data: StockStateEventData }
     | { pattern: 'stock.updated'; data: StockStateEventData };
 
@@ -60,6 +62,17 @@ export interface HoldingUpdatedEventData {
     availableQuantity: string;
     average: string;
     totalBuyAmount: string;
+}
+
+export interface OrderBookUpdatedEventData {
+    stockId: string;
+    levels: OrderBookUpdatedLevelEventData[];
+}
+
+export interface OrderBookUpdatedLevelEventData {
+    side: 'BUY' | 'SELL';
+    price: string;
+    quantity: string;
 }
 
 export interface StockStateEventData {

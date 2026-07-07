@@ -54,6 +54,21 @@ export interface RealtimeMatchedTradeState {
     tradingType: TradingType;
 }
 
+export type RealtimeOrderBookSide = 'BUY' | 'SELL';
+
+export interface RealtimeOrderBookLevelState {
+    side: RealtimeOrderBookSide;
+    price: bigint;
+    quantity: bigint;
+}
+
+export interface RealtimeOrderBookState {
+    stockId: number;
+    outputSeq: bigint;
+    buyLevels: Map<bigint, bigint>;
+    sellLevels: Map<bigint, bigint>;
+}
+
 export interface InMemoryCandle {
     candleTime: Date;
     open: bigint;

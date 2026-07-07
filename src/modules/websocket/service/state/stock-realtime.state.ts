@@ -1,8 +1,13 @@
 import { StockStatus } from '@prisma/client';
-import { RealtimeStockInfo } from '../../type/realtime-state.type';
+import {
+    RealtimeOrderBookLevelState,
+    RealtimeOrderBookState,
+    RealtimeStockInfo,
+} from '../../type/realtime-state.type';
 
 export class StockRealtimeState {
     private readonly infoById = new Map<number, RealtimeStockInfo>();
+    private readonly orderBookByStockId = new Map<number, RealtimeOrderBookState>();
 
     setInfo(info: RealtimeStockInfo): void {
         this.infoById.set(info.id, info);
@@ -20,5 +25,36 @@ export class StockRealtimeState {
 
     getInfo(stockId: number): RealtimeStockInfo | undefined {
         return this.infoById.get(stockId);
+    }
+
+    setOrderBook(orderBook: RealtimeOrderBookState): void {
+        this.orderBookByStockId.set(orderBook.stockId, orderBook);
+    }
+
+    getOrderBook(stockId: number): RealtimeOrderBookState | undefined {
+        return this.orderBookByStockId.get(stockId);
+    }
+
+    applyOrderBookUpdate(
+        stockId: number,
+        outputSeq: bigint,
+        levels: RealtimeOrderBookLevelState[],
+    ): boolean {
+        const orderBook = this.orderBookByStockId.get(stockId);
+        if (!orderBook || outputSeq <= orderBook.outputSeq) return false;
+
+        for (const level of levels) {
+            const sideLevels =
+                level.side === 'BUY' ? orderBook.buyLevels : orderBook.sellLevels;
+
+            if (level.quantity === 0n) {
+                sideLevels.delete(level.price);
+            } else {
+                sideLevels.set(level.price, level.quantity);
+            }
+        }
+
+        orderBook.outputSeq = outputSeq;
+        return true;
     }
 }

@@ -8,6 +8,13 @@ import { OrderWsService } from '../service/order-ws.service';
 import { RealtimeStateService } from '../service/realtime-state.service';
 import { StockWsService } from '../service/stock-ws.service';
 
+// @TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO @TODO
+///
+//
+// 코드 읽기를 포기 합니다. 매우 중대한 리펙토링 필요함...
+//
+//
+// @TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO @TODO
 @Controller()
 export class EventConsumer {
     private readonly logger = new Logger(EventConsumer.name);
@@ -26,11 +33,12 @@ export class EventConsumer {
         const message = context.getMessage();
 
         try {
-            await this.applyAndPublish(batch.events);
+            const outputSeq = BigInt(batch.outputSeq);
+            await this.applyAndPublish(batch.events, outputSeq);
             channel.ack(message);
         } catch (error) {
             this.logger.error(
-                `Event batch processing failed (inputSeq=${batch?.inputSeq})`,
+                `Event batch processing failed (inputSeq=${batch?.inputSeq}, outputSeq=${batch?.outputSeq})`,
                 error instanceof Error ? error.stack : error,
             );
             channel.nack(message, false, false);
@@ -38,7 +46,10 @@ export class EventConsumer {
     }
 
     // 상태 반영 후 변경된 데이터를 클라이언트에게 발행
-    private async applyAndPublish(events: DomainEvent[]): Promise<void> {
+    private async applyAndPublish(
+        events: DomainEvent[],
+        outputSeq: bigint,
+    ): Promise<void> {
         // 데이터 중복 처리 방지용
         let stockId: number | undefined;
         let updateStockInfo = false;
@@ -52,13 +63,17 @@ export class EventConsumer {
 
         // 이벤트 상태 반영 및 갱신 대상 수집
         for (const event of events) {
-            this.state.applyEvent(event);
+            const orderBookSeq =
+                event.pattern === 'orderbook.updated'
+                    ? this.state.stock.getOrderBook(Number(event.data.stockId))?.outputSeq
+                    : undefined;
+
+            this.state.applyEvent(event, outputSeq);
 
             switch (event.pattern) {
                 case 'trade.executed':
                     stockId = Number(event.data.stockId);
                     updateStockInfo = true;
-                    updateOrderBook = true;
                     updateMatchedList = true;
                     updateChart = true;
                     break;
@@ -72,7 +87,6 @@ export class EventConsumer {
                 case 'order.canceled': {
                     const accountId = Number(event.data.accountId);
                     stockId = Number(event.data.stockId);
-                    updateOrderBook = true;
                     openOrders.add(accountId);
                     if (
                         event.pattern === 'order.filled' ||
@@ -82,6 +96,12 @@ export class EventConsumer {
                     }
                     break;
                 }
+                case 'orderbook.updated':
+                    stockId = Number(event.data.stockId);
+                    if (orderBookSeq == null || outputSeq > orderBookSeq) {
+                        updateOrderBook = true;
+                    }
+                    break;
                 case 'account.updated':
                 case 'account.activated':
                     accounts.add(Number(event.data.id));
@@ -136,3 +156,5 @@ export class EventConsumer {
         }
     }
 }
+
+// :3
