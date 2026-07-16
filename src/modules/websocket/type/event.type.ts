@@ -1,6 +1,7 @@
 export interface EventBatch {
     inputSeq: number;
     outputSeq: number;
+    createdAt: string;
     events: DomainEvent[];
 }
 
@@ -10,6 +11,8 @@ export type DomainEvent =
     | { pattern: 'order.open'; data: OrderLifecycleEventData }
     | { pattern: 'order.filled'; data: OrderLifecycleEventData }
     | { pattern: 'order.canceled'; data: OrderLifecycleEventData }
+    | { pattern: 'order.replaced'; data: OrderLifecycleEventData }
+    | { pattern: 'order.completed'; data: OrderLifecycleEventData }
     | { pattern: 'order.rejected'; data: OrderRejectedEventData }
     | { pattern: 'account.updated'; data: AccountBalanceEventData }
     | { pattern: 'account.activated'; data: AccountBalanceEventData }
@@ -28,15 +31,18 @@ export interface TradeExecutedEventData {
     quantity: string;
     makerOrderId: string;
     takerOrderId: string;
+    tradingType: 'BUY' | 'SELL';
     executedAt: string;
 }
 
-// order.open / order.filled / order.canceled — 주문 상태 전이
+// order.open / filled / canceled / replaced / completed — 주문 상태 전이
 export interface OrderLifecycleEventData {
-    orderId: string;
+    id: string;
+    targetId: string;
     accountId: string;
     stockId: string;
     price: string;
+    tradingType: 'BUY' | 'SELL' | 'EDIT' | 'CANCEL';
     quantity: string;
     filledQuantity: string;
 }
@@ -44,7 +50,12 @@ export interface OrderLifecycleEventData {
 // order.rejected — 유효성 검사 실패로 거부
 export interface OrderRejectedEventData {
     orderId: string;
-    reason: string;
+    reason:
+        | 'INVALID_ORDER'
+        | 'INSUFFICIENT_BALANCE'
+        | 'INSUFFICIENT_STOCK'
+        | 'STOCK_NOT_TRADABLE'
+        | 'ORDER_NOT_ACTIVE';
 }
 
 // account.updated / account.activated — 계좌 잔고/활성화

@@ -11,20 +11,24 @@ export class OrderRealtimeState {
         number,
         Map<bigint, RealtimeOrderState>
     >();
-    set(order: RealtimeOrderState): void {
-        const openOrders = this.openOrdersByAccount.get(order.accountId);
-        const filledOrders = this.filledOrdersByAccount.get(order.accountId);
-        const currentOpenOrder = openOrders?.get(order.id);
+    private filledOrdersDate = getUtcDateKey(new Date());
 
-        // Open Order 업데이트 및 제거
-        if (openOrders && order.status === OrderStatus.OPEN) {
+    applyOrderUpdate(order: RealtimeOrderState): void {
+        this.resetFilledOrdersOnDateChange();
+        const openOrders = getOrCreateOrderMap(this.openOrdersByAccount, order.accountId);
+        const filledOrders = getOrCreateOrderMap(
+            this.filledOrdersByAccount,
+            order.accountId,
+        );
+        const currentOpenOrder = openOrders.get(order.id);
+
+        if (order.status === OrderStatus.OPEN) {
             openOrders.set(order.id, { ...currentOpenOrder, ...order });
-        } else if (openOrders) {
+        } else {
             openOrders.delete(order.id);
         }
 
-        // Filled일 경우
-        if (filledOrders && order.filledQuantity > 0n) {
+        if (order.filledQuantity > 0n) {
             filledOrders.set(order.id, {
                 ...currentOpenOrder,
                 ...filledOrders.get(order.id),
@@ -33,27 +37,46 @@ export class OrderRealtimeState {
         }
     }
 
-    getOpenOrders(accountId: number): RealtimeOrderState[] | undefined {
+    getOpenOrders(accountId: number): RealtimeOrderState[] {
         const orders = this.openOrdersByAccount.get(accountId);
-        return orders ? [...orders.values()] : undefined;
+        return orders ? [...orders.values()].map(copyOrder) : [];
     }
 
-    getFilledOrders(accountId: number): RealtimeOrderState[] | undefined {
+    getFilledOrders(accountId: number): RealtimeOrderState[] {
+        this.resetFilledOrdersOnDateChange();
         const orders = this.filledOrdersByAccount.get(accountId);
-        return orders ? [...orders.values()] : undefined;
+        return orders ? [...orders.values()].map(copyOrder) : [];
     }
 
-    setOpenOrders(accountId: number, orders: RealtimeOrderState[]): void {
-        this.openOrdersByAccount.set(
-            accountId,
-            new Map(orders.map((order) => [order.id, order])),
-        );
-    }
+    private resetFilledOrdersOnDateChange(): void {
+        const currentDate = getUtcDateKey(new Date());
+        if (currentDate === this.filledOrdersDate) return;
 
-    setFilledOrders(accountId: number, orders: RealtimeOrderState[]): void {
-        this.filledOrdersByAccount.set(
-            accountId,
-            new Map(orders.map((order) => [order.id, order])),
-        );
+        this.filledOrdersByAccount.clear();
+        this.filledOrdersDate = currentDate;
     }
+}
+
+// utill
+function getOrCreateOrderMap(
+    ordersByAccount: Map<number, Map<bigint, RealtimeOrderState>>,
+    accountId: number,
+): Map<bigint, RealtimeOrderState> {
+    let orders = ordersByAccount.get(accountId);
+    if (!orders) {
+        orders = new Map();
+        ordersByAccount.set(accountId, orders);
+    }
+    return orders;
+}
+
+function copyOrder(order: RealtimeOrderState): RealtimeOrderState {
+    return {
+        ...order,
+        createdAt: order.createdAt ? new Date(order.createdAt.getTime()) : undefined,
+    };
+}
+
+function getUtcDateKey(date: Date): string {
+    return date.toISOString().slice(0, 10);
 }

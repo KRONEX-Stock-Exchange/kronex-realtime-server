@@ -8,13 +8,6 @@ import { OrderWsService } from '../service/order-ws.service';
 import { RealtimeStateService } from '../service/realtime-state.service';
 import { StockWsService } from '../service/stock-ws.service';
 
-// @TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO @TODO
-///
-//
-// 코드 읽기를 포기 합니다. 매우 중대한 리펙토링 필요함...
-//
-//
-// @TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO @TODO
 @Controller()
 export class EventConsumer {
     private readonly logger = new Logger(EventConsumer.name);
@@ -65,7 +58,7 @@ export class EventConsumer {
         for (const event of events) {
             const orderBookSeq =
                 event.pattern === 'orderbook.updated'
-                    ? this.state.stock.getOrderBook(Number(event.data.stockId))?.outputSeq
+                    ? this.state.stock.getOrderBookOutputSeq(Number(event.data.stockId))
                     : undefined;
 
             this.state.applyEvent(event, outputSeq);
@@ -84,7 +77,8 @@ export class EventConsumer {
                     break;
                 case 'order.open':
                 case 'order.filled':
-                case 'order.canceled': {
+                case 'order.canceled':
+                case 'order.replaced': {
                     const accountId = Number(event.data.accountId);
                     stockId = Number(event.data.stockId);
                     openOrders.add(accountId);
@@ -110,6 +104,7 @@ export class EventConsumer {
                     holdings.add(`${event.data.accountId}:${event.data.stockId}`);
                     break;
                 case 'order.rejected':
+                case 'order.completed':
                     break;
             }
         }
@@ -128,7 +123,7 @@ export class EventConsumer {
                 tasks.push(this.stockWsService.sendOrderBook(stockId));
             }
             if (updateMatchedList) {
-                tasks.push(this.stockWsService.sendMatchedList(stockId));
+                tasks.push(this.stockWsService.sendMatchedTrades(stockId));
             }
         }
         openOrders.forEach((accountId) =>

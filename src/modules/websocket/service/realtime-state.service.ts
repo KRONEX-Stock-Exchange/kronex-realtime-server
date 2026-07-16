@@ -24,7 +24,7 @@ export class RealtimeStateService {
         switch (event.pattern) {
             case 'stock.listed':
             case 'stock.updated':
-                this.stock.updateInfo({
+                this.stock.applyStockUpdate({
                     id: Number(event.data.id),
                     price: BigInt(event.data.price),
                     status: event.data.status as StockStatus,
@@ -32,14 +32,14 @@ export class RealtimeStateService {
                 break;
             case 'account.updated':
             case 'account.activated':
-                this.account.setAccount({
+                this.account.applyAccountUpdate({
                     id: Number(event.data.id),
                     balance: BigInt(event.data.balance),
                     availableBalance: BigInt(event.data.availableBalance),
                 });
                 break;
             case 'holding.updated':
-                this.account.setHolding({
+                this.account.applyHoldingUpdate({
                     accountId: Number(event.data.accountId),
                     stockId: Number(event.data.stockId),
                     quantity: BigInt(event.data.quantity),
@@ -49,18 +49,31 @@ export class RealtimeStateService {
                 });
                 break;
             case 'order.open':
-                this.order.set(this.toOrderState(event.data, OrderStatus.OPEN));
+                this.order.applyOrderUpdate(
+                    this.toOrderState(event.data, OrderStatus.OPEN),
+                );
                 break;
             case 'order.filled':
-                this.order.set(this.toOrderState(event.data, OrderStatus.FILLED));
+                this.order.applyOrderUpdate(
+                    this.toOrderState(event.data, OrderStatus.FILLED),
+                );
                 break;
             case 'order.canceled':
-                this.order.set(this.toOrderState(event.data, OrderStatus.CANCELED));
+                this.order.applyOrderUpdate(
+                    this.toOrderState(event.data, OrderStatus.CANCELED),
+                );
+                break;
+            case 'order.replaced':
+                this.order.applyOrderUpdate(
+                    this.toOrderState(event.data, OrderStatus.REPLACED),
+                );
+                break;
+            case 'order.completed':
                 break;
             case 'trade.executed': {
                 const trade = this.toTradeState(event.data);
-                this.stock.updatePrice(trade.stockId, trade.price);
-                if (this.trade.add(trade)) {
+                this.stock.applyStockPriceUpdate(trade.stockId, trade.price);
+                if (this.trade.applyTrade(trade)) {
                     this.chart.applyTrade(trade);
                 }
                 break;
@@ -90,12 +103,13 @@ export class RealtimeStateService {
         status: OrderStatus,
     ): RealtimeOrderState {
         return {
-            id: BigInt(data.orderId),
+            id: BigInt(data.id),
             accountId: Number(data.accountId),
             stockId: Number(data.stockId),
             price: BigInt(data.price),
             quantity: BigInt(data.quantity),
             filledQuantity: BigInt(data.filledQuantity),
+            tradingType: data.tradingType,
             status,
         };
     }
@@ -108,6 +122,7 @@ export class RealtimeStateService {
             quantity: BigInt(data.quantity),
             makerOrderId: BigInt(data.makerOrderId),
             takerOrderId: BigInt(data.takerOrderId),
+            tradingType: data.tradingType,
             executedAt: new Date(data.executedAt),
         };
     }

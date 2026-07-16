@@ -45,6 +45,7 @@ export interface RealtimeTradeState {
     quantity: bigint;
     makerOrderId: bigint;
     takerOrderId: bigint;
+    tradingType: 'BUY' | 'SELL';
     executedAt: Date;
 }
 

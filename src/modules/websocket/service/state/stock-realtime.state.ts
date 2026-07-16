@@ -5,34 +5,31 @@ import {
     RealtimeStockInfo,
 } from '../../type/realtime-state.type';
 
+type PartialStockInfo = Pick<RealtimeStockInfo, 'id'> &
+    Partial<Omit<RealtimeStockInfo, 'id'>>;
+
 export class StockRealtimeState {
-    private readonly infoById = new Map<number, RealtimeStockInfo>();
+    private readonly infoById = new Map<number, PartialStockInfo>();
     private readonly orderBookByStockId = new Map<number, RealtimeOrderBookState>();
 
-    setInfo(info: RealtimeStockInfo): void {
-        this.infoById.set(info.id, info);
+    applyStockUpdate(update: PartialStockInfo): void {
+        const current = this.infoById.get(update.id);
+        this.infoById.set(update.id, { ...current, ...update });
     }
 
-    updateInfo(update: { id: number; price: bigint; status: StockStatus }): void {
-        const info = this.infoById.get(update.id);
-        if (info) this.infoById.set(update.id, { ...info, ...update });
-    }
-
-    updatePrice(stockId: number, price: bigint): void {
-        const info = this.infoById.get(stockId);
-        if (info) this.infoById.set(stockId, { ...info, price });
+    applyStockPriceUpdate(stockId: number, price: bigint): void {
+        const current = this.infoById.get(stockId);
+        this.infoById.set(stockId, { ...current, id: stockId, price });
     }
 
     getInfo(stockId: number): RealtimeStockInfo | undefined {
-        return this.infoById.get(stockId);
+        const info = this.infoById.get(stockId);
+        if (!info || !isCompleteStockInfo(info)) return undefined;
+        return { ...info };
     }
 
-    setOrderBook(orderBook: RealtimeOrderBookState): void {
-        this.orderBookByStockId.set(orderBook.stockId, orderBook);
-    }
-
-    getOrderBook(stockId: number): RealtimeOrderBookState | undefined {
-        return this.orderBookByStockId.get(stockId);
+    getPrice(stockId: number): bigint | undefined {
+        return this.infoById.get(stockId)?.price;
     }
 
     applyOrderBookUpdate(
@@ -40,8 +37,13 @@ export class StockRealtimeState {
         outputSeq: bigint,
         levels: RealtimeOrderBookLevelState[],
     ): boolean {
-        const orderBook = this.orderBookByStockId.get(stockId);
-        if (!orderBook || outputSeq <= orderBook.outputSeq) return false;
+        let orderBook = this.orderBookByStockId.get(stockId);
+        if (orderBook && outputSeq < orderBook.outputSeq) return false;
+
+        if (!orderBook) {
+            orderBook = createEmptyOrderBook(stockId);
+            this.orderBookByStockId.set(stockId, orderBook);
+        }
 
         for (const level of levels) {
             const sideLevels =
@@ -57,4 +59,33 @@ export class StockRealtimeState {
         orderBook.outputSeq = outputSeq;
         return true;
     }
+
+    getOrderBook(stockId: number): RealtimeOrderBookState | undefined {
+        const orderBook = this.orderBookByStockId.get(stockId);
+        if (!orderBook) return undefined;
+
+        return {
+            ...orderBook,
+            buyLevels: new Map(orderBook.buyLevels),
+            sellLevels: new Map(orderBook.sellLevels),
+        };
+    }
+
+    getOrderBookOutputSeq(stockId: number): bigint | undefined {
+        return this.orderBookByStockId.get(stockId)?.outputSeq;
+    }
+}
+
+// utill
+function isCompleteStockInfo(info: PartialStockInfo): info is RealtimeStockInfo {
+    return info.name != null && info.price != null && info.status != null;
+}
+
+function createEmptyOrderBook(stockId: number): RealtimeOrderBookState {
+    return {
+        stockId,
+        outputSeq: 0n,
+        buyLevels: new Map(),
+        sellLevels: new Map(),
+    };
 }
