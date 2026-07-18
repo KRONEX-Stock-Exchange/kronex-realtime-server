@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
+import { RedisModule } from '@nestjs-modules/ioredis';
 import { ConfigModule } from '@nestjs/config';
+import { ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { WebsocketModule } from './modules/websocket/websocket.module';
@@ -12,6 +14,13 @@ import config from './config/config';
             envFilePath: '.env',
             isGlobal: true,
             load: [config],
+        }),
+        RedisModule.forRootAsync({
+            inject: [ConfigService],
+            useFactory: (configService: ConfigService) => ({
+                type: 'single',
+                url: configService.getOrThrow<string>('REDIS_URL'),
+            }),
         }),
         ScheduleModule.forRoot(),
         PrismaModule,
