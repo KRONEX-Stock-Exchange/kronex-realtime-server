@@ -1,3 +1,5 @@
+// NOTE: 이 파일은 서버가 다루는 내부 도메인의 타입을 정의합니다.
+
 import { OrderStatus, OrderType, StockStatus, TradingType } from '@prisma/client';
 import { ChartType } from 'src/modules/chart/type/chart-type';
 
@@ -32,9 +34,11 @@ export interface RealtimeOrderState {
     quantity: bigint;
     filledQuantity: bigint;
     status: OrderStatus;
-    stockName?: string;
+    tradingType: TradingType;
+
+    // NOTE: 아래 두 타입은 포함되어야하지만 현재 Engine에서 데이터를 누락하여
+    // 보내 주고 있어 임시 Optional 처리 함
     orderType?: OrderType;
-    tradingType?: TradingType;
     createdAt?: Date;
 }
 
@@ -63,11 +67,14 @@ export interface RealtimeOrderBookLevelState {
     quantity: bigint;
 }
 
-export interface RealtimeOrderBookState {
-    stockId: number;
-    outputSeq: bigint;
-    buyLevels: Map<bigint, bigint>;
-    sellLevels: Map<bigint, bigint>;
+export interface RealtimeOrderBookLevel {
+    price: bigint;
+    quantity: bigint;
+}
+
+export interface RealtimeOrderBook {
+    buyLevels: RealtimeOrderBookLevel[];
+    sellLevels: RealtimeOrderBookLevel[];
 }
 
 export interface InMemoryCandle {

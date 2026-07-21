@@ -1,3 +1,12 @@
+// NOTE:
+// ─────────────────────────────────────────────────────────────
+// Redis 키 (AccountRealtimeState)
+//   rt:account:{accountId}              Hash  id, balance, availableBalance, accountNumber?, userId?
+//   rt:holding:{accountId}:{stockId}    Hash  quantity, availableQuantity, average, totalBuyAmount, tombstone?
+//   rt:holdings:{accountId}             Set   member=stockId (보유 종목 인덱스)
+// ─────────────────────────────────────────────────────────────
+import Redis, { ChainableCommander } from 'ioredis';
+import { HOLDING_TOMBSTONE_FIELD, RedisKeys } from 'src/modules/redis/redis-keys';
 import {
     RealtimeAccountState,
     RealtimeHoldingState,
@@ -8,57 +17,132 @@ type AccountState = RealtimeAccountState & {
 };
 
 export class AccountRealtimeState {
-    private readonly accounts = new Map<number, AccountState>();
-    private readonly holdingsByAccountId = new Map<
-        number,
-        Map<number, RealtimeHoldingState>
-    >();
+    constructor(private readonly redis: Redis) {}
 
-    applyAccountUpdate(account: AccountState): void {
-        this.accounts.set(account.id, {
-            ...this.accounts.get(account.id),
-            ...account,
-        });
+    // 계좌 조회
+    async getAccount(accountId: number): Promise<AccountState | undefined> {
+        const raw = await this.redis.hgetall(RedisKeys.account(accountId));
+        return parseAccount(accountId, raw);
     }
 
-    applyHoldingUpdate(holding: RealtimeHoldingState): void {
-        const holdings = this.holdingsByAccountId.get(holding.accountId);
+    // 특정 종목 보유 현황 조회
+    async getHolding(
+        accountId: number,
+        stockId: number,
+    ): Promise<RealtimeHoldingState | undefined> {
+        const raw = await this.redis.hgetall(RedisKeys.holding(accountId, stockId));
+        return parseHolding(accountId, stockId, raw);
+    }
+
+    // 보유 종목 전체 조회
+    async getHoldings(accountId: number): Promise<RealtimeHoldingState[]> {
+        const stockIds = await this.redis.smembers(RedisKeys.holdingIndex(accountId));
+        if (stockIds.length === 0) return [];
+
+        const pipeline = this.redis.pipeline();
+        for (const stockId of stockIds) {
+            pipeline.hgetall(RedisKeys.holding(accountId, Number(stockId)));
+        }
+        const results = await pipeline.exec();
+        if (results == null) return [];
+
+        const holdings: RealtimeHoldingState[] = [];
+        results.forEach(([error, raw], index) => {
+            if (error) return;
+            const holding = parseHolding(
+                accountId,
+                Number(stockIds[index]),
+                raw as Record<string, string>,
+            );
+            if (holding) holdings.push(holding);
+        });
+
+        return holdings;
+    }
+
+    // 계좌 정보 업데이트
+    applyAccountUpdate(account: AccountState, multi: ChainableCommander): void {
+        multi.hset(RedisKeys.account(account.id), serializeAccountFields(account));
+    }
+
+    // 종목 보유 현황 업데이트
+    applyHoldingUpdate(holding: RealtimeHoldingState, multi: ChainableCommander): void {
+        const key = RedisKeys.holding(holding.accountId, holding.stockId);
+        const indexKey = RedisKeys.holdingIndex(holding.accountId);
 
         if (holding.quantity === 0n && holding.availableQuantity === 0n) {
-            holdings?.delete(holding.stockId);
-            if (holdings?.size === 0) {
-                this.holdingsByAccountId.delete(holding.accountId);
-            }
+            multi.hset(key, {
+                ...serializeHoldingFields(holding),
+                // NOTE: Redis 데이터 미존재와 미보유 구분용
+                [HOLDING_TOMBSTONE_FIELD]: '1',
+            });
+            multi.srem(indexKey, String(holding.stockId));
+
             return;
         }
 
-        const accountHoldings = holdings ?? new Map<number, RealtimeHoldingState>();
-        accountHoldings.set(holding.stockId, {
-            ...accountHoldings.get(holding.stockId),
-            ...holding,
-        });
-        this.holdingsByAccountId.set(holding.accountId, accountHoldings);
+        multi.hset(key, serializeHoldingFields(holding));
+        multi.hdel(key, HOLDING_TOMBSTONE_FIELD);
+        multi.sadd(indexKey, String(holding.stockId));
     }
+}
 
-    getAccount(accountId: number): AccountState | undefined {
-        const account = this.accounts.get(accountId);
-        return account ? { ...account } : undefined;
+// util
+function serializeAccountFields(account: AccountState): Record<string, string> {
+    const fields: Record<string, string> = {
+        id: String(account.id),
+        balance: String(account.balance),
+        availableBalance: String(account.availableBalance),
+    };
+    if (account.accountNumber != null) {
+        fields.accountNumber = String(account.accountNumber);
     }
+    if (account.userId != null) fields.userId = String(account.userId);
 
-    getFirstAccountByUserId(userId: number): AccountState | undefined {
-        for (const account of this.accounts.values()) {
-            if (account.userId === userId) return { ...account };
-        }
-        return undefined;
-    }
+    return fields;
+}
 
-    getHolding(accountId: number, stockId: number): RealtimeHoldingState | undefined {
-        const holding = this.holdingsByAccountId.get(accountId)?.get(stockId);
-        return holding ? { ...holding } : undefined;
-    }
+function serializeHoldingFields(holding: RealtimeHoldingState): Record<string, string> {
+    return {
+        accountId: String(holding.accountId),
+        stockId: String(holding.stockId),
+        quantity: String(holding.quantity),
+        availableQuantity: String(holding.availableQuantity),
+        average: String(holding.average),
+        totalBuyAmount: String(holding.totalBuyAmount),
+    };
+}
 
-    getHoldings(accountId: number): RealtimeHoldingState[] {
-        const holdings = this.holdingsByAccountId.get(accountId);
-        return holdings ? [...holdings.values()].map((holding) => ({ ...holding })) : [];
-    }
+// NOTE: 아래 변환 함수들은 Pass-Through이기에 굳이 변환할 필요는 없지만 다른 도메인과의 일관성을 위해서
+// 유지 함 추후 제거가 필요하면 제거해도 됨
+function parseAccount(
+    accountId: number,
+    raw: Record<string, string>,
+): AccountState | undefined {
+    if (raw.balance == null || raw.availableBalance == null) return undefined;
+
+    return {
+        id: accountId,
+        balance: BigInt(raw.balance),
+        availableBalance: BigInt(raw.availableBalance),
+        accountNumber: raw.accountNumber == null ? undefined : Number(raw.accountNumber),
+        userId: raw.userId == null ? undefined : Number(raw.userId),
+    };
+}
+
+function parseHolding(
+    accountId: number,
+    stockId: number,
+    raw: Record<string, string>,
+): RealtimeHoldingState | undefined {
+    if (raw.quantity == null) return undefined;
+
+    return {
+        accountId,
+        stockId,
+        quantity: BigInt(raw.quantity),
+        availableQuantity: BigInt(raw.availableQuantity),
+        average: BigInt(raw.average),
+        totalBuyAmount: BigInt(raw.totalBuyAmount),
+    };
 }

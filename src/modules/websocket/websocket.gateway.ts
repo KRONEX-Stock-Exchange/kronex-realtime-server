@@ -105,7 +105,7 @@ export class WebsocketGateway
         const userId = client.user?.userId;
         if (userId == null) throw new WebsocketException('ACCOUNT_FORBIDDEN');
 
-        this.accountWsService.validateAccountId(userId, accountId);
+        await this.accountWsService.validateAccountId(userId, accountId);
         await client.join(getAccountRoomName(accountId));
         await this.accountWsService.sendAccountInit(accountId);
 

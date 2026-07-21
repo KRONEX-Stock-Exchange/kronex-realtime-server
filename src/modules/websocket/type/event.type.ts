@@ -1,3 +1,5 @@
+// NOTE: 이 파일은 MQ로 부터 받은 데이터의 타입을 정의합니다.
+
 export interface EventBatch {
     inputSeq: number;
     outputSeq: number;

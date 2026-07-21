@@ -6,6 +6,7 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from './common/prisma/prisma.module';
 import { WebsocketModule } from './modules/websocket/websocket.module';
 import { ChartRealtimeModule } from './modules/chart/chart-realtime.module';
+import { RedisStateModule } from './modules/redis/redis-state.module';
 import config from './config/config';
 
 @Module({
@@ -23,6 +24,7 @@ import config from './config/config';
             }),
         }),
         ScheduleModule.forRoot(),
+        RedisStateModule,
         PrismaModule,
         ChartRealtimeModule,
         WebsocketModule,

@@ -39,8 +39,8 @@ export class AccountWsService {
         this.server = server;
     }
 
-    validateAccountId(userId: number, accountId: number): void {
-        const account = this.state.account.getAccount(accountId);
+    async validateAccountId(userId: number, accountId: number): Promise<void> {
+        const account = await this.state.account.getAccount(accountId);
         if (!account) throw new WebsocketException('ACCOUNT_NOT_FOUND');
 
         if (account.userId == null || account.userId !== userId) {
@@ -48,41 +48,56 @@ export class AccountWsService {
         }
     }
 
+    // 계좌 초기 정보 전송 (잔고, 전체 보유 종목)
     async sendAccountInit(accountId: number): Promise<void> {
         const roomName = getAccountRoomName(accountId);
         if (!hasRoomMembers(this.server, roomName)) return;
 
-        const account = this.state.account.getAccount(accountId);
-        const holdings = this.state.account.getHoldings(accountId);
+        const [account, holdings] = await Promise.all([
+            this.state.account.getAccount(accountId),
+            this.state.account.getHoldings(accountId),
+        ]);
+
         const data = {
             account: account ? serializeAccount(account) : null,
-            holdings: holdings.map((holding) =>
-                serializeHolding(holding, this.state.stock.getInfo(holding.stockId)),
+            holdings: await Promise.all(
+                holdings.map(async (holding) =>
+                    serializeHolding(
+                        holding,
+                        await this.state.stock.getInfo(holding.stockId),
+                    ),
+                ),
             ),
         };
 
         this.server.to(roomName).emit('accountInit', data);
     }
 
+    // 잔고 현황 전송
     async sendAccountBalance(accountId: number): Promise<void> {
         const roomName = getAccountRoomName(accountId);
         if (!hasRoomMembers(this.server, roomName)) return;
 
-        const account = this.state.account.getAccount(accountId);
+        const account = await this.state.account.getAccount(accountId);
         const data = account ? serializeAccount(account) : null;
 
         this.server.to(roomName).emit('accountBalanceUpdated', data);
     }
 
+    // 변경된 보유 종목 현황 전송
     async sendHolding(accountId: number, stockId: number): Promise<void> {
         const roomName = getAccountRoomName(accountId);
         if (!hasRoomMembers(this.server, roomName)) return;
 
-        const holding =
-            this.state.account.getHolding(accountId, stockId) ??
-            createEmptyHolding(accountId, stockId);
-        const stock = this.state.stock.getInfo(stockId);
-        const data = serializeHolding(holding, stock);
+        const [holding, stock] = await Promise.all([
+            this.state.account.getHolding(accountId, stockId),
+            this.state.stock.getInfo(stockId),
+        ]);
+        const data = serializeHolding(
+            // NOTE: holding이 비어 있는 경우는 해당 종목을 더 이상 보유 하고 있지 않을때
+            holding ?? createEmptyHolding(accountId, stockId),
+            stock,
+        );
 
         this.server.to(roomName).emit('holdingUpdated', data);
     }

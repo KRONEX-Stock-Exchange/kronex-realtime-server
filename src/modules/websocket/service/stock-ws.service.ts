@@ -1,10 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { StockStatus } from '@prisma/client';
 import { Server } from 'socket.io';
 import { calcStockLimit } from 'src/common/helpers/stock-limit';
 import {
     RealtimeMatchedTradeState,
-    RealtimeOrderBookState,
+    RealtimeOrderBook,
+    RealtimeOrderBookLevel,
     RealtimeStockInfo,
 } from '../type/realtime-state.type';
 import { ChartWsService } from './chart-ws.service';
@@ -55,12 +55,14 @@ export class StockWsService {
         this.server = server;
     }
 
+    // 초기 종목 정보 전송 (기본정보, 호가창, 체결 현황)
     async sendStockInit(stockId: number): Promise<void> {
         await this.sendStockInfo(stockId);
         await this.sendOrderBook(stockId);
         await this.sendMatchedTrades(stockId);
     }
 
+    // 종목 정보 현황 전송
     async sendStockInfo(stockId: number): Promise<void> {
         const roomName = getStockRoomName(stockId);
         if (!hasRoomMembers(this.server, roomName)) return;
@@ -71,16 +73,18 @@ export class StockWsService {
         this.server.to(roomName).emit('stockInfoUpdated', data);
     }
 
+    // 호가창 현황 전송
     async sendOrderBook(stockId: number): Promise<void> {
         const roomName = getStockRoomName(stockId);
         if (!hasRoomMembers(this.server, roomName)) return;
 
-        const orderBook = this.state.stock.getOrderBook(stockId);
+        const orderBook = await this.state.stock.getOrderBook(stockId);
         const data = serializeOrderBook(orderBook);
 
         this.server.to(roomName).emit('orderBookUpdated', data);
     }
 
+    // 체결 현황 전송
     async sendMatchedTrades(stockId: number): Promise<void> {
         const roomName = getStockRoomName(stockId);
         if (!hasRoomMembers(this.server, roomName)) return;
@@ -91,23 +95,24 @@ export class StockWsService {
         this.server.to(roomName).emit('matchedListUpdated', data);
     }
 
+    // 주식 가격 현황 전송
     async sendStockPrice(stockId: number): Promise<void> {
         const roomName = getStockPriceRoomName(stockId);
         if (!hasRoomMembers(this.server, roomName)) return;
 
-        const price = this.state.stock.getPrice(stockId);
+        const price = await this.state.stock.getPrice(stockId);
         if (price == null) return;
 
         const data = price.toString();
         this.server.to(roomName).emit('stockPriceUpdated', data);
     }
 
-    private getStock(stockId: number): RealtimeStockInfo | null {
-        return this.state.stock.getInfo(stockId) ?? null;
+    private async getStock(stockId: number): Promise<RealtimeStockInfo | null> {
+        return (await this.state.stock.getInfo(stockId)) ?? null;
     }
 
     private async getStockInfo(stockId: number): Promise<StockInfoPayload | null> {
-        const stock = this.getStock(stockId);
+        const stock = await this.getStock(stockId);
         if (!stock) return null;
 
         const todayCandle = await this.chartWsService.recoverCurrentCandle(stockId, '1d');
@@ -148,27 +153,16 @@ function serializeMatchedTrade(trade: RealtimeMatchedTradeState): MatchedTradePa
     };
 }
 
-function serializeOrderBook(orderBook?: RealtimeOrderBookState): OrderBookPayload {
+function serializeOrderBook(orderBook?: RealtimeOrderBook): OrderBookPayload {
     return {
-        buyOrderbook: serializeOrderBookLevels(orderBook?.buyLevels, 'desc'),
-        sellOrderbook: serializeOrderBookLevels(orderBook?.sellLevels, 'asc'),
+        buyOrderbook: (orderBook?.buyLevels ?? []).map(serializeOrderBookLevel),
+        sellOrderbook: (orderBook?.sellLevels ?? []).map(serializeOrderBookLevel),
     };
 }
 
-function serializeOrderBookLevels(
-    levels: Map<bigint, bigint> | undefined,
-    direction: 'asc' | 'desc',
-): OrderBookLevelPayload[] {
-    return [...(levels?.entries() ?? [])]
-        .filter(([, quantity]) => quantity > 0n)
-        .sort(([a], [b]) => {
-            if (a === b) return 0;
-            if (direction === 'asc') return a < b ? -1 : 1;
-            return a > b ? -1 : 1;
-        })
-        .slice(0, 10)
-        .map(([price, quantity]) => ({
-            price: price.toString(),
-            quantity: quantity.toString(),
-        }));
+function serializeOrderBookLevel(level: RealtimeOrderBookLevel): OrderBookLevelPayload {
+    return {
+        price: level.price.toString(),
+        quantity: level.quantity.toString(),
+    };
 }

@@ -3,6 +3,7 @@ import {
     RealtimeTradeState,
 } from '../../type/realtime-state.type';
 
+// TODO: Redis 적용하기
 export class TradeRealtimeState {
     private readonly tradesByStock = new Map<number, TradeRingBuffer>();
     private readonly matchedTradesByStock = new Map<
