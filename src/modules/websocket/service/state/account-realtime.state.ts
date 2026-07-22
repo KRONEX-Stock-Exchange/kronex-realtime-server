@@ -2,11 +2,11 @@
 // ─────────────────────────────────────────────────────────────
 // Redis 키 (AccountRealtimeState)
 //   rt:account:{accountId}              Hash  id, balance, availableBalance, accountNumber?, userId?
-//   rt:holding:{accountId}:{stockId}    Hash  quantity, availableQuantity, average, totalBuyAmount, tombstone?
+//   rt:holding:{accountId}:{stockId}    Hash  quantity, availableQuantity, average, totalBuyAmount
 //   rt:holdings:{accountId}             Set   member=stockId (보유 종목 인덱스)
 // ─────────────────────────────────────────────────────────────
 import Redis, { ChainableCommander } from 'ioredis';
-import { HOLDING_TOMBSTONE_FIELD, RedisKeys } from 'src/modules/redis/redis-keys';
+import { RedisKeys } from 'src/modules/redis/redis-keys';
 import {
     RealtimeAccountState,
     RealtimeHoldingState,
@@ -71,18 +71,13 @@ export class AccountRealtimeState {
         const indexKey = RedisKeys.holdingIndex(holding.accountId);
 
         if (holding.quantity === 0n && holding.availableQuantity === 0n) {
-            multi.hset(key, {
-                ...serializeHoldingFields(holding),
-                // NOTE: Redis 데이터 미존재와 미보유 구분용
-                [HOLDING_TOMBSTONE_FIELD]: '1',
-            });
+            multi.del(key);
             multi.srem(indexKey, String(holding.stockId));
 
             return;
         }
 
         multi.hset(key, serializeHoldingFields(holding));
-        multi.hdel(key, HOLDING_TOMBSTONE_FIELD);
         multi.sadd(indexKey, String(holding.stockId));
     }
 }
