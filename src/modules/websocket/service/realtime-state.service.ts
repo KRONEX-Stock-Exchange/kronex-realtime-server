@@ -31,7 +31,7 @@ export class RealtimeStateService {
         @InjectRedis() private readonly redis: Redis,
         prisma: PrismaService,
     ) {
-        this.stock = new StockRealtimeState(redis);
+        this.stock = new StockRealtimeState(redis, prisma);
         this.account = new AccountRealtimeState(redis, prisma);
         this.order = new OrderRealtimeState(redis, prisma);
     }

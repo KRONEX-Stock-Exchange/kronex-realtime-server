@@ -5,10 +5,13 @@
 //   rt:orderbook:{stockId}        Hash   B:{price}/S:{price} = 수량
 //   rt:orderbook:{stockId}:buy    ZSet   member=price  (score=price, 매수 정렬)
 //   rt:orderbook:{stockId}:sell   ZSet   member=price  (score=price, 매도 정렬)
+//   rt:loaded:orderbook:{stockId} String 적재 완료 마커 (비어있는건지 DB 로드를 안한건지 구분용)
 // ─────────────────────────────────────────────────────────────
-import { StockStatus } from '@prisma/client';
+import { OrderStatus, StockStatus } from '@prisma/client';
 import Redis, { ChainableCommander } from 'ioredis';
+import { PrismaService } from 'src/common/prisma/prisma.service';
 import { RedisKeys, orderBookField } from 'src/modules/redis/redis-keys';
+import { LOAD_ORDERBOOK_SCRIPT } from 'src/modules/redis/redis-scripts';
 import {
     RealtimeOrderBook,
     RealtimeOrderBookLevel,
@@ -24,7 +27,10 @@ type PartialStockInfo = Pick<RealtimeStockInfo, 'id'> &
 const ORDERBOOK_DEPTH = 10;
 
 export class StockRealtimeState {
-    constructor(private readonly redis: Redis) {}
+    constructor(
+        private readonly redis: Redis,
+        private readonly prisma: PrismaService,
+    ) {}
 
     // 종목 가격 조회
     async getPrice(stockId: number): Promise<bigint | undefined> {
@@ -67,11 +73,7 @@ export class StockRealtimeState {
 
         if (buyPrices.length === 0 && sellPrices.length === 0) {
             if (await this.isOrderBookLoaded(stockId)) return undefined;
-
-            // TODO: 여기서 Lua 실행
-            // DB에서 status=OPEN 주문을 가격별로 집계해 적재하고 loaded 마커를 세팅한 뒤 반환한다.
-            // 쓰기 경로도 같은 적재를 시도하므로, Lua 내부에서 loaded를 재검증해 경쟁을 막는다.
-            return undefined;
+            return this.loadOrderBook(stockId, true);
         }
 
         // 각 가격대 수량 조회
@@ -87,21 +89,6 @@ export class StockRealtimeState {
         };
     }
 
-    // 가격 목록에 대응하는 수량을 일괄 조회 (빈 목록이면 Redis 호출 없음)
-    private async fetchQuantities(
-        key: string,
-        side: RealtimeOrderBookSide,
-        prices: string[],
-    ): Promise<(string | null)[]> {
-        if (prices.length === 0) return [];
-        return this.redis.hmget(key, ...prices.map((p) => orderBookField(side, p)));
-    }
-
-    private async isOrderBookLoaded(stockId: number): Promise<boolean> {
-        const loaded = await this.redis.exists(RedisKeys.orderbookLoaded(stockId));
-        return loaded === 1;
-    }
-
     // 호가창 업데이트
     async applyOrderBookUpdate(
         stockId: number,
@@ -109,9 +96,7 @@ export class StockRealtimeState {
         multi: ChainableCommander,
     ): Promise<void> {
         if (!(await this.isOrderBookLoaded(stockId))) {
-            // TODO: 여기서 Lua 실행
-            // DB에서 status=OPEN 주문을 가격별로 집계해 적재하고 loaded 마커를 세팅한다.
-            // 읽기 경로도 같은 적재를 시도하므로, Lua 내부에서 loaded를 재검증해 경쟁을 막는다.
+            await this.loadOrderBook(stockId);
         }
 
         const key = RedisKeys.orderbook(stockId);
@@ -133,9 +118,92 @@ export class StockRealtimeState {
             }
         }
     }
+
+    // 가격 목록에 대응하는 수량을 일괄 조회 (빈 목록이면 Redis 호출 없음)
+    private async fetchQuantities(
+        key: string,
+        side: RealtimeOrderBookSide,
+        prices: string[],
+    ): Promise<(string | null)[]> {
+        if (prices.length === 0) return [];
+        return this.redis.hmget(key, ...prices.map((p) => orderBookField(side, p)));
+    }
+
+    // 호가창이 DB로부터 완전히 적재됐는지 여부 확인
+    private async isOrderBookLoaded(stockId: number): Promise<boolean> {
+        const loaded = await this.redis.exists(RedisKeys.orderbookLoaded(stockId));
+        return loaded === 1;
+    }
+
+    // 호가창 DB에서 조회 후 Redis 적재
+    private async loadOrderBook(
+        stockId: number,
+        cacheOptional = false,
+    ): Promise<RealtimeOrderBook> {
+        const rows = await this.prisma.order.groupBy({
+            by: ['tradingType', 'price'],
+            where: { stockId, status: OrderStatus.OPEN },
+            _sum: { quantity: true, filledQuantity: true },
+        });
+
+        const buy: RealtimeOrderBookLevel[] = [];
+        const sell: RealtimeOrderBookLevel[] = [];
+        for (const row of rows) {
+            const remaining = (row._sum.quantity ?? 0n) - (row._sum.filledQuantity ?? 0n);
+            if (remaining <= 0n) continue;
+
+            const level = { price: row.price, quantity: remaining };
+            if (row.tradingType === 'BUY') buy.push(level);
+            else sell.push(level);
+        }
+
+        // 매수는 높은 가격, 매도는 낮은 가격이 상단
+        buy.sort((a, b) => {
+            if (a.price > b.price) return -1;
+            if (a.price < b.price) return 1;
+            return 0;
+        });
+        sell.sort((a, b) => {
+            if (a.price < b.price) return -1;
+            if (a.price > b.price) return 1;
+            return 0;
+        });
+
+        const payload = [
+            ...buy.map((level) => ({ side: 'BUY', ...serializeLevel(level) })),
+            ...sell.map((level) => ({ side: 'SELL', ...serializeLevel(level) })),
+        ];
+
+        try {
+            await this.redis.eval(
+                LOAD_ORDERBOOK_SCRIPT,
+                4,
+                RedisKeys.orderbookLoaded(stockId),
+                RedisKeys.orderbook(stockId),
+                RedisKeys.orderbookBuy(stockId),
+                RedisKeys.orderbookSell(stockId),
+                JSON.stringify(payload),
+            );
+        } catch (error) {
+            if (!cacheOptional) throw error;
+        }
+
+        return {
+            buyLevels: buy.slice(0, ORDERBOOK_DEPTH),
+            sellLevels: sell.slice(0, ORDERBOOK_DEPTH),
+        };
+    }
 }
 
 // util
+// Lua 적재 payload용 직렬화 (bigint → string)
+function serializeLevel(level: RealtimeOrderBookLevel): {
+    price: string;
+    quantity: string;
+} {
+    return { price: String(level.price), quantity: String(level.quantity) };
+}
+
 function serializeStockFields(update: PartialStockInfo): Record<string, string> {
     const fields: Record<string, string> = {};
     if (update.name != null) fields.name = update.name;

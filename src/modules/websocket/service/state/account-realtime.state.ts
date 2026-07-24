@@ -83,11 +83,13 @@ export class AccountRealtimeState {
         return holdings;
     }
 
+    // 보유 종목이 DB로부터 완전히 적재됐는지 여부 확인
     private async isHoldingLoaded(accountId: number): Promise<boolean> {
         const loaded = await this.redis.exists(RedisKeys.holdingLoaded(accountId));
         return loaded === 1;
     }
 
+    // 보유 종목 DB에서 조회 후 Redis 적재
     private async loadHoldings(
         accountId: number,
         cacheOptional = false,
