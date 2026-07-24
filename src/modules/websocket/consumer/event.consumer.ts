@@ -106,7 +106,7 @@ export class EventConsumer {
 
         // 이벤트 상태 반영 및 갱신 대상 수집
         for (const event of events) {
-            this.state.applyEvent(event, outputSeq, multi);
+            await this.state.applyEvent(event, outputSeq, multi);
 
             switch (event.pattern) {
                 case 'trade.executed':

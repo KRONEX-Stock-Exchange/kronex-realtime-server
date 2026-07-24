@@ -6,7 +6,9 @@
 //   rt:holdings:{accountId}             Set   member=stockId (보유 종목 인덱스)
 // ─────────────────────────────────────────────────────────────
 import Redis, { ChainableCommander } from 'ioredis';
+import { PrismaService } from 'src/common/prisma/prisma.service';
 import { RedisKeys } from 'src/modules/redis/redis-keys';
+import { LOAD_HOLDINGS_SCRIPT } from 'src/modules/redis/redis-scripts';
 import {
     RealtimeAccountState,
     RealtimeHoldingState,
@@ -17,12 +19,20 @@ type AccountState = RealtimeAccountState & {
 };
 
 export class AccountRealtimeState {
-    constructor(private readonly redis: Redis) {}
+    constructor(
+        private readonly redis: Redis,
+        private readonly prisma: PrismaService,
+    ) {}
 
     // 계좌 조회
     async getAccount(accountId: number): Promise<AccountState | undefined> {
         const raw = await this.redis.hgetall(RedisKeys.account(accountId));
         return parseAccount(accountId, raw);
+    }
+
+    // 계좌 정보 업데이트
+    applyAccountUpdate(account: AccountState, multi: ChainableCommander): void {
+        multi.hset(RedisKeys.account(account.id), serializeAccountFields(account));
     }
 
     // 특정 종목 보유 현황 조회
@@ -31,13 +41,26 @@ export class AccountRealtimeState {
         stockId: number,
     ): Promise<RealtimeHoldingState | undefined> {
         const raw = await this.redis.hgetall(RedisKeys.holding(accountId, stockId));
-        return parseHolding(accountId, stockId, raw);
+        const holding = parseHolding(accountId, stockId, raw);
+
+        if (holding == null) {
+            if (await this.isHoldingLoaded(accountId)) return undefined;
+
+            const holdings = await this.loadHoldings(accountId, true);
+            return holdings.find((item) => item.stockId === stockId);
+        }
+
+        return holding;
     }
 
     // 보유 종목 전체 조회
     async getHoldings(accountId: number): Promise<RealtimeHoldingState[]> {
         const stockIds = await this.redis.smembers(RedisKeys.holdingIndex(accountId));
-        if (stockIds.length === 0) return [];
+
+        if (stockIds.length === 0) {
+            if (await this.isHoldingLoaded(accountId)) return [];
+            return this.loadHoldings(accountId, true);
+        }
 
         const pipeline = this.redis.pipeline();
         for (const stockId of stockIds) {
@@ -60,13 +83,55 @@ export class AccountRealtimeState {
         return holdings;
     }
 
-    // 계좌 정보 업데이트
-    applyAccountUpdate(account: AccountState, multi: ChainableCommander): void {
-        multi.hset(RedisKeys.account(account.id), serializeAccountFields(account));
+    private async isHoldingLoaded(accountId: number): Promise<boolean> {
+        const loaded = await this.redis.exists(RedisKeys.holdingLoaded(accountId));
+        return loaded === 1;
+    }
+
+    private async loadHoldings(
+        accountId: number,
+        cacheOptional = false,
+    ): Promise<RealtimeHoldingState[]> {
+        const rows = await this.prisma.userStock.findMany({ where: { accountId } });
+        const holdings = rows.map((row) => ({
+            accountId: row.accountId,
+            stockId: row.stockId,
+            quantity: row.quantity,
+            availableQuantity: row.availableQuantity,
+            average: row.average,
+            totalBuyAmount: row.totalBuyAmount,
+        }));
+
+        const payload = holdings.map((holding) => ({
+            stockId: String(holding.stockId),
+            fields: serializeHoldingFields(holding),
+        }));
+
+        try {
+            await this.redis.eval(
+                LOAD_HOLDINGS_SCRIPT,
+                2,
+                RedisKeys.holdingLoaded(accountId),
+                RedisKeys.holdingIndex(accountId),
+                JSON.stringify(payload),
+                `rt:holding:${accountId}:`,
+            );
+        } catch (error) {
+            if (!cacheOptional) throw error;
+        }
+
+        return holdings;
     }
 
     // 종목 보유 현황 업데이트
-    applyHoldingUpdate(holding: RealtimeHoldingState, multi: ChainableCommander): void {
+    async applyHoldingUpdate(
+        holding: RealtimeHoldingState,
+        multi: ChainableCommander,
+    ): Promise<void> {
+        if (!(await this.isHoldingLoaded(holding.accountId))) {
+            await this.loadHoldings(holding.accountId);
+        }
+
         const key = RedisKeys.holding(holding.accountId, holding.stockId);
         const indexKey = RedisKeys.holdingIndex(holding.accountId);
 

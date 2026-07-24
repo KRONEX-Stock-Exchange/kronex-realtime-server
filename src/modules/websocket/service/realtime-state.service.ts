@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectRedis } from '@nestjs-modules/ioredis';
 import { OrderStatus, StockStatus } from '@prisma/client';
 import Redis, { ChainableCommander } from 'ioredis';
+import { PrismaService } from 'src/common/prisma/prisma.service';
 import {
     DomainEvent,
     OrderLifecycleEventData,
@@ -26,10 +27,13 @@ export class RealtimeStateService {
     readonly trade = new TradeRealtimeState();
     readonly chart = new ChartRealtimeState();
 
-    constructor(@InjectRedis() private readonly redis: Redis) {
+    constructor(
+        @InjectRedis() private readonly redis: Redis,
+        prisma: PrismaService,
+    ) {
         this.stock = new StockRealtimeState(redis);
-        this.account = new AccountRealtimeState(redis);
-        this.order = new OrderRealtimeState(redis);
+        this.account = new AccountRealtimeState(redis, prisma);
+        this.order = new OrderRealtimeState(redis, prisma);
     }
 
     // Redis Transaction 생성
@@ -49,7 +53,11 @@ export class RealtimeStateService {
     }
 
     // 이벤트 State 상태 반영 함수
-    applyEvent(event: DomainEvent, outputSeq: bigint, multi: ChainableCommander): void {
+    async applyEvent(
+        event: DomainEvent,
+        outputSeq: bigint,
+        multi: ChainableCommander,
+    ): Promise<void> {
         switch (event.pattern) {
             case 'stock.listed':
             case 'stock.updated':
@@ -74,7 +82,7 @@ export class RealtimeStateService {
                 );
                 break;
             case 'holding.updated':
-                this.account.applyHoldingUpdate(
+                await this.account.applyHoldingUpdate(
                     {
                         accountId: Number(event.data.accountId),
                         stockId: Number(event.data.stockId),
@@ -87,30 +95,26 @@ export class RealtimeStateService {
                 );
                 break;
             case 'order.open':
-                this.order.applyOrderUpdate(
+                await this.order.applyOrderUpdate(
                     this.toOrderState(event.data, OrderStatus.OPEN),
-                    outputSeq,
                     multi,
                 );
                 break;
             case 'order.filled':
-                this.order.applyOrderUpdate(
+                await this.order.applyOrderUpdate(
                     this.toOrderState(event.data, OrderStatus.FILLED),
-                    outputSeq,
                     multi,
                 );
                 break;
             case 'order.canceled':
-                this.order.applyOrderUpdate(
+                await this.order.applyOrderUpdate(
                     this.toOrderState(event.data, OrderStatus.CANCELED),
-                    outputSeq,
                     multi,
                 );
                 break;
             case 'order.replaced':
-                this.order.applyOrderUpdate(
+                await this.order.applyOrderUpdate(
                     this.toOrderState(event.data, OrderStatus.REPLACED),
-                    outputSeq,
                     multi,
                 );
                 break;
@@ -129,7 +133,7 @@ export class RealtimeStateService {
             }
             case 'orderbook.updated': {
                 const stockId = Number(event.data.stockId);
-                this.stock.applyOrderBookUpdate(
+                await this.stock.applyOrderBookUpdate(
                     stockId,
                     event.data.levels.map((level) => ({
                         side: level.side,

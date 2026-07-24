@@ -64,7 +64,15 @@ export class StockRealtimeState {
 
         const buyPrices = buyRaw as string[];
         const sellPrices = sellRaw as string[];
-        if (buyPrices.length === 0 && sellPrices.length === 0) return undefined;
+
+        if (buyPrices.length === 0 && sellPrices.length === 0) {
+            if (await this.isOrderBookLoaded(stockId)) return undefined;
+
+            // TODO: 여기서 Lua 실행
+            // DB에서 status=OPEN 주문을 가격별로 집계해 적재하고 loaded 마커를 세팅한 뒤 반환한다.
+            // 쓰기 경로도 같은 적재를 시도하므로, Lua 내부에서 loaded를 재검증해 경쟁을 막는다.
+            return undefined;
+        }
 
         // 각 가격대 수량 조회
         const key = RedisKeys.orderbook(stockId);
@@ -89,12 +97,23 @@ export class StockRealtimeState {
         return this.redis.hmget(key, ...prices.map((p) => orderBookField(side, p)));
     }
 
+    private async isOrderBookLoaded(stockId: number): Promise<boolean> {
+        const loaded = await this.redis.exists(RedisKeys.orderbookLoaded(stockId));
+        return loaded === 1;
+    }
+
     // 호가창 업데이트
-    applyOrderBookUpdate(
+    async applyOrderBookUpdate(
         stockId: number,
         levels: RealtimeOrderBookLevelState[],
         multi: ChainableCommander,
-    ): void {
+    ): Promise<void> {
+        if (!(await this.isOrderBookLoaded(stockId))) {
+            // TODO: 여기서 Lua 실행
+            // DB에서 status=OPEN 주문을 가격별로 집계해 적재하고 loaded 마커를 세팅한다.
+            // 읽기 경로도 같은 적재를 시도하므로, Lua 내부에서 loaded를 재검증해 경쟁을 막는다.
+        }
+
         const key = RedisKeys.orderbook(stockId);
 
         for (const level of levels) {
