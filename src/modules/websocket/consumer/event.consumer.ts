@@ -7,14 +7,17 @@ import { ChartWsService } from '../service/chart-ws.service';
 import { OrderWsService } from '../service/order-ws.service';
 import { RealtimeStateService } from '../service/realtime-state.service';
 import { StockWsService } from '../service/stock-ws.service';
+import { RedisStateService } from 'src/modules/redis/redis-state.service';
 
-// @TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO @TODO
-///
-//
-// 코드 읽기를 포기 합니다. 매우 중대한 리펙토링 필요함...
-//
-//
-// @TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO @TODO
+// Redis 장애 등 일시적 실패에 대한 재시도 설정
+const EVENT_RETRY = {
+    count: 5,
+    baseDelayMs: 100,
+    maxDelayMs: 5000,
+};
+
+// TODO: 프로세스 재시작시 큐 데이터가 중복 전달되면 Chart와 Trade가 중복 적용될 수 있음
+// Redis 적용 필요
 @Controller()
 export class EventConsumer {
     private readonly logger = new Logger(EventConsumer.name);
@@ -25,6 +28,7 @@ export class EventConsumer {
         private readonly accountWsService: AccountWsService,
         private readonly orderWsService: OrderWsService,
         private readonly chartWsService: ChartWsService,
+        private readonly redisState: RedisStateService,
     ) {}
 
     @EventPattern(EVENT_BATCH_PATTERN)
@@ -34,15 +38,51 @@ export class EventConsumer {
 
         try {
             const outputSeq = BigInt(batch.outputSeq);
-            await this.applyAndPublish(batch.events, outputSeq);
+
+            if (outputSeq <= this.redisState.getCursor()) {
+                channel.ack(message);
+                return;
+            }
+
+            await this.applyWithRetry(batch.events, outputSeq);
             channel.ack(message);
         } catch (error) {
             this.logger.error(
                 `Event batch processing failed (inputSeq=${batch?.inputSeq}, outputSeq=${batch?.outputSeq})`,
                 error instanceof Error ? error.stack : error,
             );
-            channel.nack(message, false, false);
+
+            channel.nack(message, false, true);
         }
+    }
+
+    private async applyWithRetry(
+        events: DomainEvent[],
+        outputSeq: bigint,
+    ): Promise<void> {
+        for (let attempt = 0; ; attempt++) {
+            try {
+                await this.applyAndPublish(events, outputSeq);
+                return;
+            } catch (error) {
+                if (attempt >= EVENT_RETRY.count) throw error;
+
+                const backoffMs = Math.min(
+                    EVENT_RETRY.baseDelayMs * 2 ** attempt,
+                    EVENT_RETRY.maxDelayMs,
+                );
+                const delayMs = backoffMs / 2 + Math.random() * (backoffMs / 2);
+
+                this.logger.warn(
+                    `Event batch 처리 실패, 재시도 (outputSeq=${outputSeq}, retry=${attempt + 1}/${EVENT_RETRY.count}, delay=${Math.round(delayMs)}ms)`,
+                );
+                await this.sleep(delayMs);
+            }
+        }
+    }
+
+    private sleep(ms: number): Promise<void> {
+        return new Promise((resolve) => setTimeout(resolve, ms));
     }
 
     // 상태 반영 후 변경된 데이터를 클라이언트에게 발행
@@ -61,14 +101,12 @@ export class EventConsumer {
         const accounts = new Set<number>();
         const holdings = new Set<string>();
 
+        // Redis 트랜잭션
+        const multi = this.state.createBatch();
+
         // 이벤트 상태 반영 및 갱신 대상 수집
         for (const event of events) {
-            const orderBookSeq =
-                event.pattern === 'orderbook.updated'
-                    ? this.state.stock.getOrderBook(Number(event.data.stockId))?.outputSeq
-                    : undefined;
-
-            this.state.applyEvent(event, outputSeq);
+            await this.state.applyEvent(event, outputSeq, multi);
 
             switch (event.pattern) {
                 case 'trade.executed':
@@ -84,7 +122,8 @@ export class EventConsumer {
                     break;
                 case 'order.open':
                 case 'order.filled':
-                case 'order.canceled': {
+                case 'order.canceled':
+                case 'order.replaced': {
                     const accountId = Number(event.data.accountId);
                     stockId = Number(event.data.stockId);
                     openOrders.add(accountId);
@@ -98,9 +137,7 @@ export class EventConsumer {
                 }
                 case 'orderbook.updated':
                     stockId = Number(event.data.stockId);
-                    if (orderBookSeq == null || outputSeq > orderBookSeq) {
-                        updateOrderBook = true;
-                    }
+                    updateOrderBook = true;
                     break;
                 case 'account.updated':
                 case 'account.activated':
@@ -110,9 +147,13 @@ export class EventConsumer {
                     holdings.add(`${event.data.accountId}:${event.data.stockId}`);
                     break;
                 case 'order.rejected':
+                case 'order.completed':
                     break;
             }
         }
+
+        await this.state.commitBatch(multi);
+        await this.redisState.commitCursor(outputSeq);
 
         // WebSocket 이벤트 발행
         const tasks: Promise<void>[] = [];
@@ -128,7 +169,7 @@ export class EventConsumer {
                 tasks.push(this.stockWsService.sendOrderBook(stockId));
             }
             if (updateMatchedList) {
-                tasks.push(this.stockWsService.sendMatchedList(stockId));
+                tasks.push(this.stockWsService.sendMatchedTrades(stockId));
             }
         }
         openOrders.forEach((accountId) =>

@@ -22,6 +22,8 @@ export class StockLimitService {
     }
 
     // CONSIDER: 매번 사용할때 마다 상하한가를 계산하고 있기에, 이를 저장하는 로직이 필요함
+    // 상하한가 체크
+    // TODO: 쓰는곳 찾아보기
     async limitSizeCheck(stockId: number, price: number) {
         const prevClose = await this.getPrevClose(stockId);
         if (!prevClose) throw new StockException('STOCK_HISTORIES_NOT_FOUND');

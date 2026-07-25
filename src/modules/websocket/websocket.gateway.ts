@@ -14,8 +14,12 @@ import { Server } from 'socket.io';
 import { WsGuard } from './guard/ws.guard';
 import { CustomSocket } from './interface/custom-socket.interface';
 import { WebsocketException } from './error/websocket.exception';
-import { StockWsService } from './service/stock-ws.service';
-import { AccountWsService } from './service/account-ws.service';
+import {
+    getStockPriceRoomName,
+    getStockRoomName,
+    StockWsService,
+} from './service/stock-ws.service';
+import { AccountWsService, getAccountRoomName } from './service/account-ws.service';
 import { OrderWsService } from './service/order-ws.service';
 import { ChartWsService } from './service/chart-ws.service';
 import { ChartType } from 'src/modules/chart/type/chart-type';
@@ -57,57 +61,64 @@ export class WebsocketGateway
     async onJoinStockRoom(
         @MessageBody() stockId: number,
         @ConnectedSocket() client: CustomSocket,
-    ) {
+    ): Promise<void> {
         if (stockId == null) throw new WebsocketException('INVALID_PAYLOAD');
-        await this.stockWsService.onJoinStockRoom(stockId, client);
+
+        await client.join(getStockRoomName(stockId));
+        return this.stockWsService.sendStockInit(stockId);
     }
 
     @SubscribeMessage('joinStockPriceRoom')
-    handleJoinStockPriceRoom(
+    async onJoinStockPriceRoom(
         @MessageBody() stockId: number,
         @ConnectedSocket() client: CustomSocket,
-    ) {
+    ): Promise<void> {
         if (stockId == null) throw new WebsocketException('INVALID_PAYLOAD');
-        this.stockWsService.onJoinStockPriceRoom(stockId, client);
+        await client.join(getStockPriceRoomName(stockId));
     }
 
     @SubscribeMessage('leaveStockRoom')
-    handleLeaveStockRoom(
+    async onLeaveStockRoom(
         @MessageBody() stockId: number,
         @ConnectedSocket() client: CustomSocket,
-    ) {
+    ): Promise<void> {
         if (stockId == null) throw new WebsocketException('INVALID_PAYLOAD');
-        this.stockWsService.onLeaveStockRoom(stockId, client);
+        await client.leave(getStockRoomName(stockId));
     }
 
     @SubscribeMessage('leaveStockPriceRoom')
-    handleLeaveStockPriceRoom(
+    async onLeaveStockPriceRoom(
         @MessageBody() stockId: number,
         @ConnectedSocket() client: CustomSocket,
-    ) {
+    ): Promise<void> {
         if (stockId == null) throw new WebsocketException('INVALID_PAYLOAD');
-        this.stockWsService.onLeaveStockPriceRoom(stockId, client);
+        await client.leave(getStockPriceRoomName(stockId));
     }
 
     @SubscribeMessage('joinAccountRoom')
-    async handleJoinAccountRoom(
+    async onJoinAccountRoom(
         @ConnectedSocket() client: CustomSocket,
-        @MessageBody() accountId?: number,
-    ) {
-        const resolvedAccountId = await this.accountWsService.onJoinAccountRoom(
-            client,
-            accountId,
-        );
-        await this.orderWsService.sendOrderInit(resolvedAccountId);
+        @MessageBody() accountId: number,
+    ): Promise<void> {
+        if (accountId == null) throw new WebsocketException('INVALID_PAYLOAD');
+
+        const userId = client.user?.userId;
+        if (userId == null) throw new WebsocketException('ACCOUNT_FORBIDDEN');
+
+        await this.accountWsService.validateAccountId(userId, accountId);
+        await client.join(getAccountRoomName(accountId));
+        await this.accountWsService.sendAccountInit(accountId);
+
+        return this.orderWsService.sendOrderInit(accountId);
     }
 
     @SubscribeMessage('leaveAccountRoom')
-    handleLeaveAccountRoom(
+    async onLeaveAccountRoom(
         @ConnectedSocket() client: CustomSocket,
         @MessageBody() accountId: number,
-    ) {
+    ): Promise<void> {
         if (accountId == null) throw new WebsocketException('INVALID_PAYLOAD');
-        this.accountWsService.onLeaveAccountRoom(client, accountId);
+        await client.leave(getAccountRoomName(accountId));
     }
 
     @SubscribeMessage('joinChartRoom')

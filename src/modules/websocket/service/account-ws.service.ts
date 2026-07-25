@@ -1,205 +1,149 @@
 import { Injectable } from '@nestjs/common';
-import { PrismaService } from 'src/common/prisma/prisma.service';
-import { CustomSocket } from '../interface/custom-socket.interface';
 import { Server } from 'socket.io';
 import { WebsocketException } from '../error/websocket.exception';
+import {
+    RealtimeAccountState,
+    RealtimeHoldingState,
+    RealtimeStockInfo,
+} from '../type/realtime-state.type';
 import { RealtimeStateService } from './realtime-state.service';
+import { hasRoomMembers } from './socket-room.util';
+
+type SerializedAccount = {
+    id: number;
+    accountNumber?: number;
+    balance: string;
+    availableBalance: string;
+};
+
+type SerializedHolding = {
+    stockId: number;
+    quantity: string;
+    availableQuantity: string;
+    average: string;
+    totalBuyAmount: string;
+    stock?: {
+        id: number;
+        name: string;
+        price: string;
+    };
+};
 
 @Injectable()
 export class AccountWsService {
     private server: Server;
 
-    constructor(
-        private readonly prismaService: PrismaService,
-        private readonly state: RealtimeStateService,
-    ) {}
+    constructor(private readonly state: RealtimeStateService) {}
 
-    setServer(server: Server) {
+    setServer(server: Server): void {
         this.server = server;
     }
 
-    private accountRoom(accountId: number) {
-        return `account_${accountId}`;
-    }
+    async validateAccountId(userId: number, accountId: number): Promise<void> {
+        const account = await this.state.account.getAccount(accountId);
+        if (!account) throw new WebsocketException('ACCOUNT_NOT_FOUND');
 
-    // Join / Leave
-    async onJoinAccountRoom(client: CustomSocket, accountId?: number): Promise<number> {
-        const userId = client.user.userId;
-        let resolvedAccountId: number;
-
-        if (accountId) {
-            const account = await this.prismaService.account.findUnique({
-                where: { id: accountId },
-                select: { id: true, userId: true },
-            });
-
-            if (!account) throw new WebsocketException('ACCOUNT_NOT_FOUND');
-            if (account.userId !== userId)
-                throw new WebsocketException('ACCOUNT_FORBIDDEN');
-            resolvedAccountId = account.id;
-        } else {
-            // accountId 없이 들어온다면 첫번째로 생성한 계좌로 구독
-            const account = await this.prismaService.account.findFirst({
-                where: { userId },
-                orderBy: { createdAt: 'asc' },
-                select: { id: true },
-            });
-
-            if (!account) throw new WebsocketException('ACCOUNT_NOT_FOUND');
-            resolvedAccountId = account.id;
+        if (account.userId == null || account.userId !== userId) {
+            throw new WebsocketException('ACCOUNT_FORBIDDEN');
         }
-
-        client.join(this.accountRoom(resolvedAccountId));
-        await this.sendAccountInit(resolvedAccountId);
-        return resolvedAccountId;
     }
 
-    onLeaveAccountRoom(client: CustomSocket, accountId: number) {
-        client.leave(this.accountRoom(accountId));
-    }
+    // 계좌 초기 정보 전송 (잔고, 전체 보유 종목)
+    async sendAccountInit(accountId: number): Promise<void> {
+        const roomName = getAccountRoomName(accountId);
+        if (!hasRoomMembers(this.server, roomName)) return;
 
-    // 초기 계좌 데이터 WebSocket 발행
-    private async sendAccountInit(accountId: number) {
         const [account, holdings] = await Promise.all([
-            this.getAccount(accountId),
-            this.getHoldings(accountId),
+            this.state.account.getAccount(accountId),
+            this.state.account.getHoldings(accountId),
         ]);
-        const data = { account, holdings };
 
-        this.server.to(this.accountRoom(accountId)).emit('accountInit', data);
+        const data = {
+            account: account ? serializeAccount(account) : null,
+            holdings: await Promise.all(
+                holdings.map(async (holding) =>
+                    serializeHolding(
+                        holding,
+                        await this.state.stock.getInfo(holding.stockId),
+                    ),
+                ),
+            ),
+        };
+
+        this.server.to(roomName).emit('accountInit', data);
     }
 
-    // 잔고 데이터 WebSocket 발행
+    // 잔고 현황 전송
     async sendAccountBalance(accountId: number): Promise<void> {
-        const data = await this.getAccount(accountId);
-        if (!data) return;
+        const roomName = getAccountRoomName(accountId);
+        if (!hasRoomMembers(this.server, roomName)) return;
 
-        this.server.to(this.accountRoom(accountId)).emit('accountBalanceUpdated', data);
+        const account = await this.state.account.getAccount(accountId);
+        const data = account ? serializeAccount(account) : null;
+
+        this.server.to(roomName).emit('accountBalanceUpdated', data);
     }
 
-    // 보유 종목 데이터 WebSocket 발행
+    // 변경된 보유 종목 현황 전송
     async sendHolding(accountId: number, stockId: number): Promise<void> {
-        const data = await this.getHolding(accountId, stockId);
-        if (!data) return;
+        const roomName = getAccountRoomName(accountId);
+        if (!hasRoomMembers(this.server, roomName)) return;
 
-        this.server.to(this.accountRoom(accountId)).emit('holdingUpdated', data);
+        const [holding, stock] = await Promise.all([
+            this.state.account.getHolding(accountId, stockId),
+            this.state.stock.getInfo(stockId),
+        ]);
+        const data = serializeHolding(
+            // NOTE: holding이 비어 있는 경우는 해당 종목을 더 이상 보유 하고 있지 않을때
+            holding ?? createEmptyHolding(accountId, stockId),
+            stock,
+        );
+
+        this.server.to(roomName).emit('holdingUpdated', data);
     }
+}
 
-    private async getAccount(accountId: number) {
-        const cached = this.state.account.getAccount(accountId);
-        // NOTE: accountUpdate가 먼저 들어 올 경우에 accountNumber가 존재 하지 않기때문에 SQL 조회 필요
-        if (cached?.accountNumber != null) {
-            return this.serializeAccount(cached);
-        }
+// utill
+export function getAccountRoomName(accountId: number): string {
+    return `account_${accountId}`;
+}
 
-        const row = await this.prismaService.account.findUnique({
-            where: { id: accountId },
-            select: {
-                id: true,
-                accountNumber: true,
-                balance: true,
-                availableBalance: true,
-            },
-        });
-        if (!row) return null;
+function createEmptyHolding(accountId: number, stockId: number): RealtimeHoldingState {
+    return {
+        accountId,
+        stockId,
+        quantity: 0n,
+        availableQuantity: 0n,
+        average: 0n,
+        totalBuyAmount: 0n,
+    };
+}
 
-        this.state.account.setAccount(row);
-        const account = this.state.account.getAccount(accountId);
-        return account ? this.serializeAccount(account) : null;
-    }
+function serializeAccount(account: RealtimeAccountState): SerializedAccount {
+    return {
+        id: account.id,
+        accountNumber: account.accountNumber,
+        balance: account.balance.toString(),
+        availableBalance: account.availableBalance.toString(),
+    };
+}
 
-    private async getHolding(accountId: number, stockId: number) {
-        const cached = this.state.account.getHolding(accountId, stockId);
-        if (cached) return this.serializeHolding(cached);
-
-        const holding = await this.prismaService.userStock.findUnique({
-            where: { accountId_stockId: { accountId, stockId } },
-            select: {
-                accountId: true,
-                stockId: true,
-                quantity: true,
-                availableQuantity: true,
-                average: true,
-                totalBuyAmount: true,
-            },
-        });
-        if (!holding) return null;
-
-        this.state.account.setHolding(holding);
-        const cachedHolding = this.state.account.getHolding(accountId, stockId);
-        return cachedHolding ? this.serializeHolding(cachedHolding) : null;
-    }
-
-    private async getHoldings(accountId: number) {
-        const cached = this.state.account.getHoldings(accountId);
-        if (cached.length > 0) {
-            return cached.map((holding) => this.serializeHolding(holding));
-        }
-
-        const rows = await this.prismaService.userStock.findMany({
-            where: { accountId },
-            select: {
-                stockId: true,
-                quantity: true,
-                availableQuantity: true,
-                average: true,
-                totalBuyAmount: true,
-                stock: {
-                    select: { id: true, name: true, price: true, status: true },
-                },
-            },
-        });
-
-        return rows.map((row) => {
-            this.state.stock.setInfo(row.stock);
-            const holding = {
-                accountId,
-                stockId: row.stockId,
-                quantity: row.quantity,
-                availableQuantity: row.availableQuantity,
-                average: row.average,
-                totalBuyAmount: row.totalBuyAmount,
-            };
-            this.state.account.setHolding(holding);
-
-            return this.serializeHolding(holding);
-        });
-    }
-
-    // Util
-    private serializeAccount(account: {
-        id: number;
-        accountNumber?: number;
-        balance: bigint;
-        availableBalance: bigint;
-    }) {
-        return {
-            id: account.id,
-            accountNumber: account.accountNumber,
-            balance: account.balance.toString(),
-            availableBalance: account.availableBalance.toString(),
-        };
-    }
-
-    private serializeHolding(holding: {
-        stockId: number;
-        quantity: bigint;
-        availableQuantity: bigint;
-        average: bigint;
-        totalBuyAmount: bigint;
-    }) {
-        const stock = this.state.stock.getInfo(holding.stockId);
-        return {
-            stockId: holding.stockId,
-            quantity: holding.quantity.toString(),
-            availableQuantity: holding.availableQuantity.toString(),
-            average: holding.average.toString(),
-            totalBuyAmount: holding.totalBuyAmount.toString(),
-            stock: stock && {
-                id: stock.id,
-                name: stock.name,
-                price: stock.price.toString(),
-            },
-        };
-    }
+function serializeHolding(
+    holding: RealtimeHoldingState,
+    stock?: RealtimeStockInfo,
+): SerializedHolding {
+    return {
+        stockId: holding.stockId,
+        quantity: holding.quantity.toString(),
+        availableQuantity: holding.availableQuantity.toString(),
+        average: holding.average.toString(),
+        totalBuyAmount: holding.totalBuyAmount.toString(),
+        stock: stock
+            ? {
+                  id: stock.id,
+                  name: stock.name,
+                  price: stock.price.toString(),
+              }
+            : undefined,
+    };
 }

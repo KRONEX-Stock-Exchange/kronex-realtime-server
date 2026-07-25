@@ -79,6 +79,7 @@ Kronex Engine
 - Node.js 20+
 - MySQL
 - RabbitMQ
+- Redis
 - npm
 
 ### 1. Installation
@@ -96,6 +97,7 @@ npm install
 ```env
 DATABASE_URL="mysql://USER:PASSWORD@HOST:PORT/DATABASE"
 RABBITMQ_URL="amqp://USER:PASSWORD@HOST:PORT"
+REDIS_URL="redis://localhost:6379"
 
 ACCESS_TOKEN_SECRET="access-token-secret" # API Server와 동일해야합니다
 REALTIME_SERVER_PORT=3001

@@ -5,6 +5,7 @@ import {
     RealtimeTradeState,
 } from '../../type/realtime-state.type';
 
+// TODO: Redis 적용하기
 export class ChartRealtimeState {
     private readonly currentCandles = new Map<string, InMemoryCandle>();
     private pendingCandles: PendingCandle[] = [];
