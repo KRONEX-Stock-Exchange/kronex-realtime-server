@@ -8,7 +8,10 @@
 import Redis, { ChainableCommander } from 'ioredis';
 import { PrismaService } from 'src/common/prisma/prisma.service';
 import { RedisKeys } from 'src/modules/redis/redis-keys';
-import { LOAD_HOLDINGS_SCRIPT } from 'src/modules/redis/redis-scripts';
+import {
+    LOAD_ACCOUNT_SCRIPT,
+    LOAD_HOLDINGS_SCRIPT,
+} from 'src/modules/redis/redis-scripts';
 import {
     RealtimeAccountState,
     RealtimeHoldingState,
@@ -27,12 +30,62 @@ export class AccountRealtimeState {
     // 계좌 조회
     async getAccount(accountId: number): Promise<AccountState | undefined> {
         const raw = await this.redis.hgetall(RedisKeys.account(accountId));
-        return parseAccount(accountId, raw);
+        const account = parseAccount(accountId, raw);
+        if (account && this.isCompleteAccount(account)) return account;
+
+        return this.loadAccount(accountId, true);
+    }
+
+    isCompleteAccount(account: AccountState): boolean {
+        return account.userId != null && account.accountNumber != null;
     }
 
     // 계좌 정보 업데이트
-    applyAccountUpdate(account: AccountState, multi: ChainableCommander): void {
+    async applyAccountUpdate(
+        account: AccountState,
+        multi: ChainableCommander,
+    ): Promise<void> {
+        if (!(await this.isAccountLoaded(account.id))) {
+            await this.loadAccount(account.id);
+        }
+
         multi.hset(RedisKeys.account(account.id), serializeAccountFields(account));
+    }
+
+    private async isAccountLoaded(accountId: number): Promise<boolean> {
+        const loaded = await this.redis.hexists(RedisKeys.account(accountId), 'userId');
+        return loaded === 1;
+    }
+
+    // 계좌 정보 DB에서 조회 후 Redis 적재
+    private async loadAccount(
+        accountId: number,
+        cacheOptional = false,
+    ): Promise<AccountState | undefined> {
+        const row = await this.prisma.account.findUnique({ where: { id: accountId } });
+        if (row == null) return undefined;
+
+        try {
+            await this.redis.eval(
+                LOAD_ACCOUNT_SCRIPT,
+                1,
+                RedisKeys.account(accountId),
+                String(row.balance),
+                String(row.availableBalance),
+                String(row.accountNumber),
+                String(row.userId),
+            );
+        } catch (error) {
+            if (!cacheOptional) throw error;
+        }
+
+        return {
+            id: row.id,
+            balance: row.balance,
+            availableBalance: row.availableBalance,
+            accountNumber: row.accountNumber,
+            userId: row.userId,
+        };
     }
 
     // 특정 종목 보유 현황 조회

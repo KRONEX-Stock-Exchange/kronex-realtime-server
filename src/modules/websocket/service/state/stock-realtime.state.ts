@@ -11,7 +11,10 @@ import { OrderStatus, StockStatus } from '@prisma/client';
 import Redis, { ChainableCommander } from 'ioredis';
 import { PrismaService } from 'src/common/prisma/prisma.service';
 import { RedisKeys, orderBookField } from 'src/modules/redis/redis-keys';
-import { LOAD_ORDERBOOK_SCRIPT } from 'src/modules/redis/redis-scripts';
+import {
+    LOAD_ORDERBOOK_SCRIPT,
+    LOAD_STOCK_SCRIPT,
+} from 'src/modules/redis/redis-scripts';
 import {
     RealtimeOrderBook,
     RealtimeOrderBookLevel,
@@ -35,23 +38,73 @@ export class StockRealtimeState {
     // 종목 가격 조회
     async getPrice(stockId: number): Promise<bigint | undefined> {
         const price = await this.redis.hget(RedisKeys.stock(stockId), 'price');
-        return price == null ? undefined : BigInt(price);
+        if (price != null) return BigInt(price);
+
+        const info = await this.loadStock(stockId, true);
+
+        return info.price;
     }
 
     // 종목 정보 조회
     async getInfo(stockId: number): Promise<RealtimeStockInfo | undefined> {
         const raw = await this.redis.hgetall(RedisKeys.stock(stockId));
         const info = parseStockInfo(stockId, raw);
-        if (!info || !isCompleteStockInfo(info)) return undefined;
-        return info;
+        if (info && this.isCompleteStockInfo(info)) return info;
+
+        return this.loadStock(stockId, true);
+    }
+
+    isCompleteStockInfo(info: PartialStockInfo): info is RealtimeStockInfo {
+        return info.name != null && info.price != null && info.status != null;
     }
 
     // 종목 정보 업데이트
-    applyStockUpdate(update: PartialStockInfo, multi: ChainableCommander): void {
+    async applyStockUpdate(
+        update: PartialStockInfo,
+        multi: ChainableCommander,
+    ): Promise<void> {
+        if (!(await this.isStockLoaded(update.id))) {
+            await this.loadStock(update.id);
+        }
+
         const fields = serializeStockFields(update);
         if (Object.keys(fields).length > 0) {
             multi.hset(RedisKeys.stock(update.id), fields);
         }
+    }
+
+    private async isStockLoaded(stockId: number): Promise<boolean> {
+        const loaded = await this.redis.hexists(RedisKeys.stock(stockId), 'name');
+        return loaded === 1;
+    }
+
+    // 종목 정보 DB에서 조회 후 Redis 적재
+    private async loadStock(
+        stockId: number,
+        cacheOptional = false,
+    ): Promise<RealtimeStockInfo | undefined> {
+        const row = await this.prisma.stock.findUnique({ where: { id: stockId } });
+        if (row == null) return undefined;
+
+        try {
+            await this.redis.eval(
+                LOAD_STOCK_SCRIPT,
+                1,
+                RedisKeys.stock(stockId),
+                row.name,
+                String(row.price),
+                row.status,
+            );
+        } catch (error) {
+            if (!cacheOptional) throw error;
+        }
+
+        return {
+            id: row.id,
+            name: row.name,
+            price: row.price,
+            status: row.status,
+        };
     }
 
     // 호가창 조회
@@ -223,10 +276,6 @@ function parseStockInfo(
         price: raw.price == null ? undefined : BigInt(raw.price),
         status: raw.status as StockStatus | undefined,
     };
-}
-
-function isCompleteStockInfo(info: PartialStockInfo): info is RealtimeStockInfo {
-    return info.name != null && info.price != null && info.status != null;
 }
 
 // 정렬된 가격 배열 + 대응 수량 배열을 레벨 배열로 조립 (수량 누락분은 스킵)

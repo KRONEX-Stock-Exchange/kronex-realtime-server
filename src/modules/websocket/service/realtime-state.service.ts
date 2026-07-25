@@ -61,7 +61,7 @@ export class RealtimeStateService {
         switch (event.pattern) {
             case 'stock.listed':
             case 'stock.updated':
-                this.stock.applyStockUpdate(
+                await this.stock.applyStockUpdate(
                     {
                         id: Number(event.data.id),
                         price: BigInt(event.data.price),
@@ -72,7 +72,7 @@ export class RealtimeStateService {
                 break;
             case 'account.updated':
             case 'account.activated':
-                this.account.applyAccountUpdate(
+                await this.account.applyAccountUpdate(
                     {
                         id: Number(event.data.id),
                         balance: BigInt(event.data.balance),
@@ -122,7 +122,7 @@ export class RealtimeStateService {
                 break;
             case 'trade.executed': {
                 const trade = this.toTradeState(event.data);
-                this.stock.applyStockUpdate(
+                await this.stock.applyStockUpdate(
                     { id: trade.stockId, price: trade.price },
                     multi,
                 );
