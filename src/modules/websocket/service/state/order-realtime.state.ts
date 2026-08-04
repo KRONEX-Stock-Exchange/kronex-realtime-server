@@ -97,21 +97,23 @@ export class OrderRealtimeState {
         accountId: number,
         cacheOptional = false,
     ): Promise<{ open: RealtimeOrderState[]; filled: RealtimeOrderState[] }> {
-        const rows = await this.prisma.order.findMany({
-            where: {
-                accountId,
-                status: { in: [OrderStatus.OPEN, OrderStatus.FILLED] },
-            },
-            orderBy: { id: 'desc' },
-        });
+        // NOTE: 주문건 수가 많을 경우에 배열 크기로 인해 메모리 오버플로우가 발생하는 경우가 있어
+        // 체결 주문은 FILLED_ORDERS_LIMIT 만큼 제한하여 조회 함
+        // 이는 페이지네이션 구현 이후에 수정이 필요함
+        const [openRows, filledRows] = await Promise.all([
+            this.prisma.order.findMany({
+                where: { accountId, status: OrderStatus.OPEN },
+                orderBy: { id: 'desc' },
+            }),
+            this.prisma.order.findMany({
+                where: { accountId, status: OrderStatus.FILLED },
+                orderBy: { id: 'desc' },
+                take: FILLED_ORDERS_LIMIT,
+            }),
+        ]);
 
-        const open: RealtimeOrderState[] = [];
-        const filled: RealtimeOrderState[] = [];
-        for (const row of rows) {
-            const order = toOrderState(row);
-            if (order.status === OrderStatus.OPEN) open.push(order);
-            else if (filled.length < FILLED_ORDERS_LIMIT) filled.push(order);
-        }
+        const open = openRows.map(toOrderState);
+        const filled = filledRows.map(toOrderState);
 
         const payload = [...open, ...filled].map((order) => ({
             id: String(order.id),
