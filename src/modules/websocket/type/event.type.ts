@@ -45,6 +45,7 @@ export interface OrderLifecycleEventData {
     stockId: string;
     price: string;
     tradingType: 'BUY' | 'SELL' | 'EDIT' | 'CANCEL';
+    orderType: 'LIMIT' | 'MARKET';
     quantity: string;
     filledQuantity: string;
 }

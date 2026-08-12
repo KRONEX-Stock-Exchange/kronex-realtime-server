@@ -162,6 +162,7 @@ export class RealtimeStateService {
             quantity: BigInt(data.quantity),
             filledQuantity: BigInt(data.filledQuantity),
             tradingType: data.tradingType,
+            orderType: data.orderType,
             status,
         };
     }

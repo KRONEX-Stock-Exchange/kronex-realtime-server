@@ -171,9 +171,9 @@ function serializeOrderFields(order: RealtimeOrderState): Record<string, string>
         filledQuantity: String(order.filledQuantity),
         status: order.status,
         tradingType: order.tradingType,
+        orderType: order.orderType,
     };
 
-    if (order.orderType != null) fields.orderType = order.orderType;
     if (order.createdAt != null) fields.createdAt = order.createdAt.toISOString();
 
     return fields;

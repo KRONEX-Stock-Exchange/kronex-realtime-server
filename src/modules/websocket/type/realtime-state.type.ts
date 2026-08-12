@@ -35,10 +35,10 @@ export interface RealtimeOrderState {
     filledQuantity: bigint;
     status: OrderStatus;
     tradingType: TradingType;
+    orderType: OrderType;
 
     // NOTE: 아래 두 타입은 포함되어야하지만 현재 Engine에서 데이터를 누락하여
     // 보내 주고 있어 임시 Optional 처리 함
-    orderType?: OrderType;
     createdAt?: Date;
 }
 
