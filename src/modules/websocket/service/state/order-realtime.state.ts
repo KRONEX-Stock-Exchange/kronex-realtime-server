@@ -3,7 +3,7 @@
 // Redis 키 (OrderRealtimeState)
 //   rt:order:{orderId}            Hash  id, accountId, stockId, price, quantity, filledQuantity, status, tradingType, orderType?, createdAt(nullable)?, fullyFilledAt(nullable)?
 //   rt:openOrders:{accountId}     ZSet  member=orderId  (score=order.id / 미체결)
-//   rt:filledOrders:{accountId}   ZSet  member=orderId  (score=order.id / 체결)
+//   rt:filledOrders:{accountId}   ZSet  member=orderId  (score=fullyFilledAt epoch ms, 없으면 order.id / 체결)
 //   rt:loaded:order:{accountId}   String 적재 완료 마커 (비어있는건지 DB 로드를 안한건지 구분용)
 // ─────────────────────────────────────────────────────────────
 import { Order, OrderStatus, OrderType, TradingType } from '@prisma/client';
@@ -37,16 +37,15 @@ export class OrderRealtimeState {
 
         const openIndex = RedisKeys.openOrderIndex(order.accountId);
         const filledIndex = RedisKeys.filledOrderIndex(order.accountId);
-        const score = Number(order.id);
         const member = String(order.id);
 
         if (order.status === OrderStatus.OPEN) {
             // 신규 주문 또는 부분 체결
-            multi.zadd(openIndex, score, member);
+            multi.zadd(openIndex, Number(order.id), member);
         } else if (order.status === OrderStatus.FILLED) {
             // 전량 체결
             multi.zrem(openIndex, member);
-            multi.zadd(filledIndex, score, member);
+            multi.zadd(filledIndex, filledOrderScore(order), member);
         } else {
             // 주문 취소 및 정정
             multi.zrem(openIndex, member);
@@ -56,7 +55,7 @@ export class OrderRealtimeState {
 
     // 미체결 주문 전체 조회
     async getOpenOrders(accountId: number): Promise<RealtimeOrderState[]> {
-        const orderIds = await this.redis.zrange(
+        const orderIds = await this.redis.zrevrange(
             RedisKeys.openOrderIndex(accountId),
             0,
             -1,
@@ -107,7 +106,7 @@ export class OrderRealtimeState {
             }),
             this.prisma.order.findMany({
                 where: { accountId, status: OrderStatus.FILLED },
-                orderBy: { id: 'desc' },
+                orderBy: { fullyFilledAt: 'desc' },
                 take: FILLED_ORDERS_LIMIT,
             }),
         ]);
@@ -118,6 +117,10 @@ export class OrderRealtimeState {
         const payload = [...open, ...filled].map((order) => ({
             id: String(order.id),
             tab: order.status === OrderStatus.OPEN ? 'o' : 'f',
+            score:
+                order.status === OrderStatus.OPEN
+                    ? Number(order.id)
+                    : filledOrderScore(order),
             fields: serializeOrderFields(order),
         }));
 
@@ -161,6 +164,11 @@ export class OrderRealtimeState {
 }
 
 // utill
+// NOTE: 체결 ZSet 정렬 기준: fullyFilledAt, 없으면(옛날 주문 호환용) order.id로 폴백
+function filledOrderScore(order: RealtimeOrderState): number {
+    return order.fullyFilledAt != null ? order.fullyFilledAt.getTime() : Number(order.id);
+}
+
 function serializeOrderFields(order: RealtimeOrderState): Record<string, string> {
     const fields: Record<string, string> = {
         id: String(order.id),

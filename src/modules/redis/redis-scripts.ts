@@ -23,8 +23,9 @@ return 1
 // KEYS[1] = rt:loaded:order:{acc}
 // KEYS[2] = rt:openOrders:{acc}
 // KEYS[3] = rt:filledOrders:{acc}
-// ARGV[1] = 주문 JSON 배열 [{ id, tab: 'o'|'f', fields: { ... } }]
+// ARGV[1] = 주문 JSON 배열 [{ id, tab: 'o'|'f', score, fields: { ... } }]
 // ARGV[2] = 주문 본체 키 프리픽스 (rt:order:)
+// score: open은 order.id, filled는 fullyFilledAt(epoch ms, 없으면 order.id)
 export const LOAD_ORDERS_SCRIPT = `
 if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
 
@@ -40,9 +41,9 @@ for i = 1, #orders do
         redis.call('HSET', ARGV[2] .. order.id, unpack(args))
     end
     if order.tab == 'o' then
-        redis.call('ZADD', KEYS[2], order.id, order.id)
+        redis.call('ZADD', KEYS[2], order.score, order.id)
     else
-        redis.call('ZADD', KEYS[3], order.id, order.id)
+        redis.call('ZADD', KEYS[3], order.score, order.id)
     end
 end
 
