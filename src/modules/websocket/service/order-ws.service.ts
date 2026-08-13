@@ -16,7 +16,7 @@ interface OrderPayload {
     tradingType: TradingType;
     status: OrderStatus;
     orderType?: OrderType;
-    createdAt?: Date;
+    createdAt: Date | null;
 }
 
 @Injectable()

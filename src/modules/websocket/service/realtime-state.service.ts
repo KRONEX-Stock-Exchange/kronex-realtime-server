@@ -164,6 +164,7 @@ export class RealtimeStateService {
             tradingType: data.tradingType,
             orderType: data.orderType,
             status,
+            createdAt: data.createdAt != null ? new Date(data.createdAt) : null,
         };
     }
 
