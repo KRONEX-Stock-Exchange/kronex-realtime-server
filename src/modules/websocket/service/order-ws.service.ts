@@ -17,6 +17,7 @@ interface OrderPayload {
     status: OrderStatus;
     orderType?: OrderType;
     createdAt: Date | null;
+    fullyFilledAt: Date | null;
 }
 
 @Injectable()
@@ -90,5 +91,6 @@ function serializeOrder(
         tradingType: order.tradingType,
         status: order.status,
         createdAt: order.createdAt,
+        fullyFilledAt: order.fullyFilledAt,
     };
 }

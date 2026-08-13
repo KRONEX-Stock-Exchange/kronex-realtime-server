@@ -1,7 +1,7 @@
 // NOTE:
 // ─────────────────────────────────────────────────────────────
 // Redis 키 (OrderRealtimeState)
-//   rt:order:{orderId}            Hash  id, accountId, stockId, price, quantity, filledQuantity, status, tradingType, orderType?, createdAt(nullable)?
+//   rt:order:{orderId}            Hash  id, accountId, stockId, price, quantity, filledQuantity, status, tradingType, orderType?, createdAt(nullable)?, fullyFilledAt(nullable)?
 //   rt:openOrders:{accountId}     ZSet  member=orderId  (score=order.id / 미체결)
 //   rt:filledOrders:{accountId}   ZSet  member=orderId  (score=order.id / 체결)
 //   rt:loaded:order:{accountId}   String 적재 완료 마커 (비어있는건지 DB 로드를 안한건지 구분용)
@@ -177,6 +177,9 @@ function serializeOrderFields(order: RealtimeOrderState): Record<string, string>
     // NOTE: 옛날 주문 호환용
     if (order.createdAt != null) fields.createdAt = order.createdAt.toISOString();
 
+    if (order.fullyFilledAt != null)
+        fields.fullyFilledAt = order.fullyFilledAt.toISOString();
+
     return fields;
 }
 
@@ -193,6 +196,7 @@ function toOrderState(row: Order): RealtimeOrderState {
         tradingType: row.tradingType,
         orderType: row.orderType,
         createdAt: row.createdAt,
+        fullyFilledAt: row.fullyFilledAt,
     };
 }
 
@@ -210,5 +214,6 @@ function parseOrder(raw: Record<string, string>): RealtimeOrderState | undefined
         tradingType: raw.tradingType as TradingType,
         orderType: raw.orderType as OrderType | undefined,
         createdAt: raw.createdAt == null ? null : new Date(raw.createdAt),
+        fullyFilledAt: raw.fullyFilledAt == null ? null : new Date(raw.fullyFilledAt),
     };
 }

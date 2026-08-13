@@ -49,6 +49,7 @@ export interface OrderLifecycleEventData {
     quantity: string;
     filledQuantity: string;
     createdAt: string | null;
+    fullyFilledAt: string | null;
 }
 
 // order.rejected — 유효성 검사 실패로 거부

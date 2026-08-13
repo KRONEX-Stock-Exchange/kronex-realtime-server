@@ -37,6 +37,7 @@ export interface RealtimeOrderState {
     tradingType: TradingType;
     orderType: OrderType;
     createdAt: Date | null;
+    fullyFilledAt: Date | null;
 }
 
 export interface RealtimeTradeState {

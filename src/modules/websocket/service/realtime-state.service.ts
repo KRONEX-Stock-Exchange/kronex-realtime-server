@@ -165,6 +165,7 @@ export class RealtimeStateService {
             orderType: data.orderType,
             status,
             createdAt: data.createdAt != null ? new Date(data.createdAt) : null,
+            fullyFilledAt: data.fullyFilledAt != null ? new Date(data.fullyFilledAt) : null,
         };
     }
 
