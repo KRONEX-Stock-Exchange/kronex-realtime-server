@@ -2,6 +2,7 @@ import { Controller, Logger } from '@nestjs/common';
 import { Ctx, EventPattern, Payload, RmqContext } from '@nestjs/microservices';
 import { EVENT_BATCH_PATTERN } from '../serializer/event-batch.deserializer';
 import { DomainEvent, EventBatch } from '../type/event.type';
+import { RealtimeOrderState } from '../type/realtime-state.type';
 import { AccountWsService } from '../service/account-ws.service';
 import { ChartWsService } from '../service/chart-ws.service';
 import { OrderWsService } from '../service/order-ws.service';
@@ -96,8 +97,7 @@ export class EventConsumer {
         let updateOrderBook = false;
         let updateMatchedList = false;
         let updateChart = false;
-        const openOrders = new Set<number>();
-        const filledOrders = new Set<number>();
+        const orderUpdates = new Map<number, RealtimeOrderState[]>();
         const accounts = new Set<number>();
         const holdings = new Set<string>();
 
@@ -106,7 +106,7 @@ export class EventConsumer {
 
         // 이벤트 상태 반영 및 갱신 대상 수집
         for (const event of events) {
-            await this.state.applyEvent(event, outputSeq, multi);
+            const orderState = await this.state.applyEvent(event, multi);
 
             switch (event.pattern) {
                 case 'trade.executed':
@@ -126,12 +126,10 @@ export class EventConsumer {
                 case 'order.replaced': {
                     const accountId = Number(event.data.accountId);
                     stockId = Number(event.data.stockId);
-                    openOrders.add(accountId);
-                    if (
-                        event.pattern === 'order.filled' ||
-                        Number(event.data.filledQuantity) > 0
-                    ) {
-                        filledOrders.add(accountId);
+                    if (orderState) {
+                        const list = orderUpdates.get(accountId) ?? [];
+                        list.push(orderState);
+                        orderUpdates.set(accountId, list);
                     }
                     break;
                 }
@@ -172,11 +170,8 @@ export class EventConsumer {
                 tasks.push(this.stockWsService.sendMatchedTrades(stockId));
             }
         }
-        openOrders.forEach((accountId) =>
-            tasks.push(this.orderWsService.sendOpenOrders(accountId)),
-        );
-        filledOrders.forEach((accountId) =>
-            tasks.push(this.orderWsService.sendFilledOrders(accountId)),
+        orderUpdates.forEach((orders, accountId) =>
+            tasks.push(this.orderWsService.sendOrder(accountId, orders)),
         );
         accounts.forEach((accountId) =>
             tasks.push(this.accountWsService.sendAccountBalance(accountId)),

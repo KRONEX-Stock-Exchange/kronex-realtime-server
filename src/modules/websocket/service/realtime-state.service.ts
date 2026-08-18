@@ -53,11 +53,11 @@ export class RealtimeStateService {
     }
 
     // 이벤트 State 상태 반영 함수
+    // NOTE: 주문 관련 이벤트면 반영한 주문 상태를 돌려줌
     async applyEvent(
         event: DomainEvent,
-        outputSeq: bigint,
         multi: ChainableCommander,
-    ): Promise<void> {
+    ): Promise<RealtimeOrderState | undefined> {
         switch (event.pattern) {
             case 'stock.listed':
             case 'stock.updated':
@@ -69,7 +69,7 @@ export class RealtimeStateService {
                     },
                     multi,
                 );
-                break;
+                return undefined;
             case 'account.updated':
             case 'account.activated':
                 await this.account.applyAccountUpdate(
@@ -80,7 +80,7 @@ export class RealtimeStateService {
                     },
                     multi,
                 );
-                break;
+                return undefined;
             case 'holding.updated':
                 await this.account.applyHoldingUpdate(
                     {
@@ -93,33 +93,23 @@ export class RealtimeStateService {
                     },
                     multi,
                 );
-                break;
+                return undefined;
             case 'order.open':
-                await this.order.applyOrderUpdate(
-                    this.toOrderState(event.data, OrderStatus.OPEN),
-                    multi,
-                );
-                break;
             case 'order.filled':
-                await this.order.applyOrderUpdate(
-                    this.toOrderState(event.data, OrderStatus.FILLED),
-                    multi,
-                );
-                break;
             case 'order.canceled':
-                await this.order.applyOrderUpdate(
-                    this.toOrderState(event.data, OrderStatus.CANCELED),
-                    multi,
-                );
-                break;
-            case 'order.replaced':
-                await this.order.applyOrderUpdate(
-                    this.toOrderState(event.data, OrderStatus.REPLACED),
-                    multi,
-                );
-                break;
+            case 'order.replaced': {
+                const statusMap: Record<typeof event.pattern, OrderStatus> = {
+                    'order.open': OrderStatus.OPEN,
+                    'order.filled': OrderStatus.FILLED,
+                    'order.canceled': OrderStatus.CANCELED,
+                    'order.replaced': OrderStatus.REPLACED,
+                };
+                const order = this.toOrderState(event.data, statusMap[event.pattern]);
+                await this.order.applyOrderUpdate(order, multi);
+                return order;
+            }
             case 'order.completed':
-                break;
+                return undefined;
             case 'trade.executed': {
                 const trade = this.toTradeState(event.data);
                 await this.stock.applyStockUpdate(
@@ -129,7 +119,7 @@ export class RealtimeStateService {
                 if (this.trade.applyTrade(trade)) {
                     this.chart.applyTrade(trade);
                 }
-                break;
+                return undefined;
             }
             case 'orderbook.updated': {
                 const stockId = Number(event.data.stockId);
@@ -142,10 +132,10 @@ export class RealtimeStateService {
                     })),
                     multi,
                 );
-                break;
+                return undefined;
             }
             case 'order.rejected':
-                break;
+                return undefined;
         }
     }
 
@@ -165,7 +155,8 @@ export class RealtimeStateService {
             orderType: data.orderType,
             status,
             createdAt: data.createdAt != null ? new Date(data.createdAt) : null,
-            fullyFilledAt: data.fullyFilledAt != null ? new Date(data.fullyFilledAt) : null,
+            fullyFilledAt:
+                data.fullyFilledAt != null ? new Date(data.fullyFilledAt) : null,
         };
     }
 

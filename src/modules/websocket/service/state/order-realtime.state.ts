@@ -10,13 +10,16 @@ import { Order, OrderStatus, OrderType, TradingType } from '@prisma/client';
 import Redis, { ChainableCommander } from 'ioredis';
 import { PrismaService } from 'src/common/prisma/prisma.service';
 import { RedisKeys } from 'src/modules/redis/redis-keys';
-import { LOAD_ORDERS_SCRIPT } from 'src/modules/redis/redis-scripts';
+import { LOAD_ORDER_INDEX_SCRIPT } from 'src/modules/redis/redis-scripts';
 import { RealtimeOrderState } from '../../type/realtime-state.type';
 
-// 체결 주문은 최근 N개만 제공
-// TODO: 체결, 미체결 주문 페이지네이션 구현이 필요함 + 정렬 (현재는 미체결 탭은 생성순(오름차순), 체결 탭은 최신순(내림차순)으로 정렬 중)
-// 현재는 미체결 주문 전체 제공, 체결 주문 최대 25개 제공 중
-const FILLED_ORDERS_LIMIT = 25;
+// 커서 페이지네이션 기본 페이지 크기
+const DEFAULT_ORDER_PAGE_LIMIT = 30;
+
+export interface OrderPage {
+    orders: RealtimeOrderState[];
+    nextCursor: string | null;
+}
 
 export class OrderRealtimeState {
     constructor(
@@ -30,7 +33,7 @@ export class OrderRealtimeState {
         multi: ChainableCommander,
     ): Promise<void> {
         if (!(await this.isLoaded(order.accountId))) {
-            await this.loadOrders(order.accountId);
+            await this.loadOrderIndex(order.accountId);
         }
 
         multi.hset(RedisKeys.order(order.id), serializeOrderFields(order));
@@ -53,36 +56,52 @@ export class OrderRealtimeState {
         }
     }
 
-    // 미체결 주문 전체 조회
-    async getOpenOrders(accountId: number): Promise<RealtimeOrderState[]> {
-        const orderIds = await this.redis.zrevrange(
-            RedisKeys.openOrderIndex(accountId),
-            0,
-            -1,
-        );
-
-        if (orderIds.length === 0) {
-            if (await this.isLoaded(accountId)) return [];
-            return (await this.loadOrders(accountId, true)).open;
+    // 미체결 주문 커서 페이지 조회
+    // NOTE: 생성순 내림차순. 커서 = 직전 페이지 마지막 주문의 ID
+    async getOpenOrders(
+        accountId: number,
+        cursor?: string,
+        limit = DEFAULT_ORDER_PAGE_LIMIT,
+    ): Promise<OrderPage> {
+        if (!(await this.isLoaded(accountId))) {
+            await this.loadOrderIndex(accountId, true);
         }
 
-        return this.fetchOrders(orderIds);
+        const ids = await this.rangeByScore(
+            RedisKeys.openOrderIndex(accountId),
+            cursor,
+            limit,
+        );
+        const orders = await this.fetchOrders(ids);
+        const nextCursor =
+            ids.length === limit ? String(orders[orders.length - 1].id) : null;
+
+        return { orders, nextCursor };
     }
 
-    // 체결 주문 조회
-    async getFilledOrders(accountId: number): Promise<RealtimeOrderState[]> {
-        const orderIds = await this.redis.zrevrange(
-            RedisKeys.filledOrderIndex(accountId),
-            0,
-            FILLED_ORDERS_LIMIT - 1,
-        );
-
-        if (orderIds.length === 0) {
-            if (await this.isLoaded(accountId)) return [];
-            return (await this.loadOrders(accountId, true)).filled;
+    // 체결 주문 커서 페이지 조회
+    // NOTE: 전량체결 시각 내림차순. 커서 = 직전 페이지 마지막 주문의 fullyFilledAt 또는 ID
+    async getFilledOrders(
+        accountId: number,
+        cursor?: string,
+        limit = DEFAULT_ORDER_PAGE_LIMIT,
+    ): Promise<OrderPage> {
+        if (!(await this.isLoaded(accountId))) {
+            await this.loadOrderIndex(accountId, true);
         }
 
-        return this.fetchOrders(orderIds);
+        const ids = await this.rangeByScore(
+            RedisKeys.filledOrderIndex(accountId),
+            cursor,
+            limit,
+        );
+        const orders = await this.fetchOrders(ids);
+        const nextCursor =
+            ids.length === limit
+                ? String(filledOrderScore(orders[orders.length - 1]))
+                : null;
+
+        return { orders, nextCursor };
     }
 
     // 주문 목록이 DB로부터 완전히 적재됐는지 여부 확인
@@ -91,57 +110,51 @@ export class OrderRealtimeState {
         return loaded === 1;
     }
 
-    // 주문 DB에서 조회 후 Redis 적재
-    private async loadOrders(
+    // 특정 인덱스에 범위안의 데이터 조회
+    private async rangeByScore(
+        indexKey: string, // index
+        cursor: string | undefined, // 어디서 부터 (Cursor 미포함)
+        limit: number, // 가져올 최대 갯수
+    ): Promise<string[]> {
+        const maxScore = cursor != null ? `(${cursor}` : '+inf';
+
+        return this.redis.zrevrangebyscore(indexKey, maxScore, '-inf', 'LIMIT', 0, limit);
+    }
+
+    // 주문 인덱스 리스트 조회
+    private async loadOrderIndex(
         accountId: number,
         cacheOptional = false,
-    ): Promise<{ open: RealtimeOrderState[]; filled: RealtimeOrderState[] }> {
-        // NOTE: 주문건 수가 많을 경우에 배열 크기로 인해 메모리 오버플로우가 발생하는 경우가 있어
-        // 체결 주문은 FILLED_ORDERS_LIMIT 만큼 제한하여 조회 함
-        // 이는 페이지네이션 구현 이후에 수정이 필요함
-        const [openRows, filledRows] = await Promise.all([
-            this.prisma.order.findMany({
-                where: { accountId, status: OrderStatus.OPEN },
-                orderBy: { id: 'desc' },
-            }),
-            this.prisma.order.findMany({
-                where: { accountId, status: OrderStatus.FILLED },
-                orderBy: { fullyFilledAt: 'desc' },
-                take: FILLED_ORDERS_LIMIT,
-            }),
-        ]);
+    ): Promise<void> {
+        const rows = await this.prisma.order.findMany({
+            where: { accountId, status: { in: [OrderStatus.OPEN, OrderStatus.FILLED] } },
+            select: { id: true, status: true, fullyFilledAt: true },
+        });
 
-        const open = openRows.map(toOrderState);
-        const filled = filledRows.map(toOrderState);
-
-        const payload = [...open, ...filled].map((order) => ({
-            id: String(order.id),
-            tab: order.status === OrderStatus.OPEN ? 'o' : 'f',
+        const payload = rows.map((row) => ({
+            id: String(row.id),
+            tab: row.status === OrderStatus.OPEN ? 'o' : 'f',
             score:
-                order.status === OrderStatus.OPEN
-                    ? Number(order.id)
-                    : filledOrderScore(order),
-            fields: serializeOrderFields(order),
+                row.status === OrderStatus.OPEN ? Number(row.id) : filledOrderScore(row),
         }));
 
         try {
             await this.redis.eval(
-                LOAD_ORDERS_SCRIPT,
+                LOAD_ORDER_INDEX_SCRIPT,
                 3,
                 RedisKeys.orderLoaded(accountId),
                 RedisKeys.openOrderIndex(accountId),
                 RedisKeys.filledOrderIndex(accountId),
                 JSON.stringify(payload),
-                'rt:order:',
             );
         } catch (error) {
             if (!cacheOptional) throw error;
         }
-
-        return { open: [...open].reverse(), filled };
     }
 
     // ID 기반 Order 데이터 조회
+    // NOTE: Redis에 없는 건 DB에서 채워서 반환
+    // 캐싱 시도 (실패해도 무시)
     private async fetchOrders(orderIds: string[]): Promise<RealtimeOrderState[]> {
         if (orderIds.length === 0) return [];
 
@@ -152,20 +165,50 @@ export class OrderRealtimeState {
         const results = await pipeline.exec();
         if (results == null) return [];
 
-        const orders: RealtimeOrderState[] = [];
-        for (const [error, raw] of results) {
-            if (error) continue;
+        const orders = new Map<string, RealtimeOrderState>();
+        const missingIds: string[] = [];
+
+        results.forEach(([error, raw], index) => {
+            if (error) return;
             const order = parseOrder(raw as Record<string, string>);
-            if (order) orders.push(order);
+            if (order) {
+                orders.set(orderIds[index], order);
+            } else {
+                missingIds.push(orderIds[index]);
+            }
+        });
+
+        if (missingIds.length > 0) {
+            const rows = await this.prisma.order.findMany({
+                where: { id: { in: missingIds.map((id) => BigInt(id)) } },
+            });
+
+            const hydratePipeline = this.redis.pipeline();
+            for (const row of rows) {
+                const order = toOrderState(row);
+                orders.set(String(order.id), order);
+                hydratePipeline.hset(
+                    RedisKeys.order(order.id),
+                    serializeOrderFields(order),
+                );
+            }
+
+            try {
+                await hydratePipeline.exec();
+            } catch {
+                // 캐싱 실패는 무시 — 응답은 위에서 DB로 읽은 값 그대로 나감. 다음 요청 때 다시 캐시 미스로 재시도됨
+            }
         }
 
-        return orders;
+        return orderIds
+            .map((id) => orders.get(id))
+            .filter((order): order is RealtimeOrderState => order != null);
     }
 }
 
 // utill
-// NOTE: 체결 ZSet 정렬 기준: fullyFilledAt, 없으면(옛날 주문 호환용) order.id로 폴백
-function filledOrderScore(order: RealtimeOrderState): number {
+// 체결 ZSet 정렬 기준: fullyFilledAt, 없으면(옛날 주문 호환용) order.id로 폴백
+function filledOrderScore(order: { id: bigint; fullyFilledAt: Date | null }): number {
     return order.fullyFilledAt != null ? order.fullyFilledAt.getTime() : Number(order.id);
 }
 
@@ -191,7 +234,7 @@ function serializeOrderFields(order: RealtimeOrderState): Record<string, string>
     return fields;
 }
 
-// DB row → 도메인 타입 (초기 적재용)
+// DB row → 도메인 타입
 function toOrderState(row: Order): RealtimeOrderState {
     return {
         id: row.id,

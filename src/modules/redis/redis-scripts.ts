@@ -23,23 +23,15 @@ return 1
 // KEYS[1] = rt:loaded:order:{acc}
 // KEYS[2] = rt:openOrders:{acc}
 // KEYS[3] = rt:filledOrders:{acc}
-// ARGV[1] = 주문 JSON 배열 [{ id, tab: 'o'|'f', score, fields: { ... } }]
-// ARGV[2] = 주문 본체 키 프리픽스 (rt:order:)
+// ARGV[1] = 주문 인덱스 JSON 배열 [{ id, tab: 'o'|'f', score }]
 // score: open은 order.id, filled는 fullyFilledAt(epoch ms, 없으면 order.id)
-export const LOAD_ORDERS_SCRIPT = `
+// NOTE: 주문 실 데이터(Hash)는 안 채움 — 페이지 조회 시 온디맨드로 채워짐 (order-realtime.state.ts의 fetchOrders 참고)
+export const LOAD_ORDER_INDEX_SCRIPT = `
 if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
 
 local orders = cjson.decode(ARGV[1])
 for i = 1, #orders do
     local order = orders[i]
-    local args = {}
-    for field, value in pairs(order.fields) do
-        args[#args + 1] = field
-        args[#args + 1] = value
-    end
-    if #args > 0 then
-        redis.call('HSET', ARGV[2] .. order.id, unpack(args))
-    end
     if order.tab == 'o' then
         redis.call('ZADD', KEYS[2], order.score, order.id)
     else

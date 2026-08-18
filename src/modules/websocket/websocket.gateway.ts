@@ -121,6 +121,42 @@ export class WebsocketGateway
         await client.leave(getAccountRoomName(accountId));
     }
 
+    // 미체결 주문 다음 페이지 조회
+    @SubscribeMessage('getOpenOrders')
+    async onGetOpenOrders(
+        @ConnectedSocket() client: CustomSocket,
+        @MessageBody('accountId') accountId: number,
+        @MessageBody('cursor') cursor?: string,
+        @MessageBody('limit') limit?: number,
+    ) {
+        if (accountId == null) throw new WebsocketException('INVALID_PAYLOAD');
+
+        const userId = client.user?.userId;
+        if (userId == null) throw new WebsocketException('ACCOUNT_FORBIDDEN');
+
+        await this.accountWsService.validateAccountId(userId, accountId);
+
+        return this.orderWsService.fetchOpenOrdersPage(accountId, cursor, limit);
+    }
+
+    // 체결 주문 다음 페이지 조회
+    @SubscribeMessage('getFilledOrders')
+    async onGetFilledOrders(
+        @ConnectedSocket() client: CustomSocket,
+        @MessageBody('accountId') accountId: number,
+        @MessageBody('cursor') cursor?: string,
+        @MessageBody('limit') limit?: number,
+    ) {
+        if (accountId == null) throw new WebsocketException('INVALID_PAYLOAD');
+
+        const userId = client.user?.userId;
+        if (userId == null) throw new WebsocketException('ACCOUNT_FORBIDDEN');
+
+        await this.accountWsService.validateAccountId(userId, accountId);
+
+        return this.orderWsService.fetchFilledOrdersPage(accountId, cursor, limit);
+    }
+
     @SubscribeMessage('joinChartRoom')
     async handleJoinChartRoom(
         @ConnectedSocket() client: CustomSocket,
