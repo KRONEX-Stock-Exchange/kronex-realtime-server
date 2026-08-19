@@ -29,7 +29,7 @@ export class ChartWsService implements OnModuleInit {
             }
         }
 
-        this.logger.log('캔들 초기화 완료');
+        this.logger.log('initializeCandles Complete');
     }
 
     private async initializeCandleForType(stockId: number, type: ChartType) {
@@ -43,14 +43,78 @@ export class ChartWsService implements OnModuleInit {
             ? new Date(lastCandle.candleTime.getTime() + this.getDurationMs(type))
             : new Date(0);
 
-        const trades = await this.prismaService.trade.findMany({
+        // 해당 종목 첫 체결일
+        const firstTrade = await this.prismaService.trade.findFirst({
             where: { stockId, matchedAt: { gte: fromTime } },
             orderBy: { matchedAt: 'asc' },
+            select: { matchedAt: true },
         });
+        if (!firstTrade) return;
 
+        const todayStart = this.state.chart.getCandleTime(new Date(), '1d');
+
+        let dayCursor = this.state.chart.getCandleTime(firstTrade.matchedAt, '1d');
+        while (dayCursor.getTime() < todayStart.getTime()) {
+            const dayEnd = new Date(dayCursor.getTime() + this.getDurationMs('1d'));
+            const rangeFrom = fromTime > dayCursor ? fromTime : dayCursor;
+            await this.upsertCompletedCandlesInRange(stockId, type, rangeFrom, dayEnd);
+            dayCursor = dayEnd;
+        }
+
+        // NOTE: 오늘자는 메모리에 올라가있기 때문에 별도 처리
+        const todayFrom = fromTime > todayStart ? fromTime : todayStart;
+        await this.initializeTodayCandle(stockId, type, todayFrom);
+    }
+
+    private async upsertCompletedCandlesInRange(
+        stockId: number,
+        type: ChartType,
+        from: Date,
+        to: Date,
+    ): Promise<void> {
+        const trades = await this.prismaService.trade.findMany({
+            where: { stockId, matchedAt: { gte: from, lt: to } },
+            orderBy: { matchedAt: 'asc' },
+        });
         if (trades.length === 0) return;
 
-        // trades를 캔들 시간대별로 그룹핑
+        const candleMap = this.groupTradesByCandle(trades, type);
+        for (const candle of candleMap.values()) {
+            await this.upsertCandle(stockId, type, candle);
+        }
+    }
+
+    private async initializeTodayCandle(
+        stockId: number,
+        type: ChartType,
+        from: Date,
+    ): Promise<void> {
+        const trades = await this.prismaService.trade.findMany({
+            where: { stockId, matchedAt: { gte: from } },
+            orderBy: { matchedAt: 'asc' },
+        });
+        if (trades.length === 0) return;
+
+        const candleMap = this.groupTradesByCandle(trades, type);
+        const currentTimeKey = this.state.chart.getCandleTime(new Date(), type).getTime();
+
+        // 현재 진행 중인 봉은 메모리에, 미저장 완성봉은 DB에 저장
+        for (const [timeKey, candle] of candleMap) {
+            if (timeKey === currentTimeKey) {
+                if (!this.state.chart.getCurrentCandle(stockId, type)) {
+                    this.state.chart.setCurrentCandle(stockId, type, candle);
+                }
+            } else {
+                await this.upsertCandle(stockId, type, candle);
+            }
+        }
+    }
+
+    // trades를 캔들 시간대별로 그룹핑
+    private groupTradesByCandle(
+        trades: { matchedAt: Date; price: bigint; quantity: bigint }[],
+        type: ChartType,
+    ): Map<number, InMemoryCandle> {
         const candleMap = new Map<number, InMemoryCandle>();
         for (const trade of trades) {
             const ct = this.state.chart.getCandleTime(trade.matchedAt, type);
@@ -74,45 +138,40 @@ export class ChartWsService implements OnModuleInit {
             }
         }
 
-        const now = new Date();
-        const currentCandleTime = this.state.chart.getCandleTime(now, type);
+        return candleMap;
+    }
 
-        // 현재 진행 중인 봉은 메모리에, 미저장 완성봉은 DB에 저장
-        const currentTimeKey = currentCandleTime.getTime();
-        for (const [timeKey, candle] of candleMap) {
-            if (timeKey === currentTimeKey) {
-                if (!this.state.chart.getCurrentCandle(stockId, type)) {
-                    this.state.chart.setCurrentCandle(stockId, type, candle);
-                }
-            } else {
-                await this.prismaService.candle.upsert({
-                    where: {
-                        stockId_candleTime_type: {
-                            stockId,
-                            candleTime: candle.candleTime,
-                            type: CANDLE_TYPE[type],
-                        },
-                    },
-                    create: {
-                        stockId,
-                        candleTime: candle.candleTime,
-                        type: CANDLE_TYPE[type],
-                        open: candle.open,
-                        high: candle.high,
-                        low: candle.low,
-                        close: candle.close,
-                        volume: candle.volume,
-                    },
-                    update: {
-                        open: candle.open,
-                        high: candle.high,
-                        low: candle.low,
-                        close: candle.close,
-                        volume: candle.volume,
-                    },
-                });
-            }
-        }
+    private async upsertCandle(
+        stockId: number,
+        type: ChartType,
+        candle: InMemoryCandle,
+    ): Promise<void> {
+        await this.prismaService.candle.upsert({
+            where: {
+                stockId_candleTime_type: {
+                    stockId,
+                    candleTime: candle.candleTime,
+                    type: CANDLE_TYPE[type],
+                },
+            },
+            create: {
+                stockId,
+                candleTime: candle.candleTime,
+                type: CANDLE_TYPE[type],
+                open: candle.open,
+                high: candle.high,
+                low: candle.low,
+                close: candle.close,
+                volume: candle.volume,
+            },
+            update: {
+                open: candle.open,
+                high: candle.high,
+                low: candle.low,
+                close: candle.close,
+                volume: candle.volume,
+            },
+        });
     }
 
     setServer(server: Server) {
