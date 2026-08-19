@@ -6,6 +6,7 @@
 //   rt:filledOrders:{accountId}   ZSet  member=orderId  (score=fullyFilledAt epoch ms, 없으면 order.id / 체결)
 //   rt:loaded:order:{accountId}   String 적재 완료 마커 (비어있는건지 DB 로드를 안한건지 구분용)
 // ─────────────────────────────────────────────────────────────
+import { Logger } from '@nestjs/common';
 import { Order, OrderStatus, OrderType, TradingType } from '@prisma/client';
 import Redis, { ChainableCommander } from 'ioredis';
 import { PrismaService } from 'src/common/prisma/prisma.service';
@@ -13,8 +14,8 @@ import { RedisKeys } from 'src/modules/redis/redis-keys';
 import { LOAD_ORDER_INDEX_SCRIPT } from 'src/modules/redis/redis-scripts';
 import { RealtimeOrderState } from '../../type/realtime-state.type';
 
-// 커서 페이지네이션 기본 페이지 크기
 const DEFAULT_ORDER_PAGE_LIMIT = 30;
+const CLOSED_ORDER_CACHE_TTL_SECONDS = 60 * 60 * 24; // 24시간
 
 export interface OrderPage {
     orders: RealtimeOrderState[];
@@ -22,6 +23,8 @@ export interface OrderPage {
 }
 
 export class OrderRealtimeState {
+    private readonly logger = new Logger(OrderRealtimeState.name);
+
     constructor(
         private readonly redis: Redis,
         private readonly prisma: PrismaService,
@@ -49,10 +52,12 @@ export class OrderRealtimeState {
             // 전량 체결
             multi.zrem(openIndex, member);
             multi.zadd(filledIndex, filledOrderScore(order), member);
+            multi.expire(RedisKeys.order(order.id), CLOSED_ORDER_CACHE_TTL_SECONDS);
         } else {
             // 주문 취소 및 정정
             multi.zrem(openIndex, member);
             multi.zrem(filledIndex, member);
+            multi.expire(RedisKeys.order(order.id), CLOSED_ORDER_CACHE_TTL_SECONDS);
         }
     }
 
@@ -191,12 +196,30 @@ export class OrderRealtimeState {
                     RedisKeys.order(order.id),
                     serializeOrderFields(order),
                 );
+                if (order.status !== OrderStatus.OPEN) {
+                    hydratePipeline.expire(
+                        RedisKeys.order(order.id),
+                        CLOSED_ORDER_CACHE_TTL_SECONDS,
+                    );
+                }
             }
 
+            // 캐싱은 베스트에포트 — 실패해도 응답은 위에서 DB로 읽은 값 그대로 나감.
+            // throw/retry는 안 하되, 조용히 묻히지 않도록 실패는 로그로 남김
             try {
-                await hydratePipeline.exec();
-            } catch {
-                // 캐싱 실패는 무시 — 응답은 위에서 DB로 읽은 값 그대로 나감. 다음 요청 때 다시 캐시 미스로 재시도됨
+                const results = await hydratePipeline.exec();
+                const failedCount =
+                    results?.filter(([error]) => error != null).length ?? 0;
+                if (failedCount > 0) {
+                    this.logger.warn(
+                        `Order cache rehydrate partially failed (${failedCount})`,
+                    );
+                }
+            } catch (error) {
+                this.logger.warn(
+                    'Order cache rehydrate pipeline failed',
+                    error instanceof Error ? error.stack : error,
+                );
             }
         }
 
