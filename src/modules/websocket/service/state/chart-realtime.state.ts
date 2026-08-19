@@ -65,8 +65,13 @@ export class ChartRealtimeState {
     }
 
     flushDayCandles(): void {
+        const todayCandleTime = this.getCandleTime(new Date(), '1d').getTime();
+
         for (const [key, candle] of this.currentCandles.entries()) {
             if (!key.endsWith(':1d')) continue;
+            // NOTE: 자정 Cron 작동시 ApplyTrade로 이미 오늘 자 현재 봉이 만들어져있는 경우에
+            // 메모리에 있는 현재봉을 완성봉으로 착각하여 조기 완성 해버리는 버그가 있어 시간 체크를 해야함
+            if (candle.candleTime.getTime() >= todayCandleTime) continue;
             const stockId = Number(key.split(':')[0]);
             this.pendingCandles.push({ stockId, type: '1d', candle });
             this.currentCandles.delete(key);
